@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# az-api -- Agent Zero API server launcher
+# Usage: az-api
+
+REAL_PATH="$(readlink -f "$0" 2>/dev/null || python3 -c "import os; print(os.path.realpath('$0'))")"
+SCRIPT_DIR="$(dirname "$REAL_PATH")"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+exec "$PROJECT_ROOT/venv-agent-zero/bin/python" -m bridge.api_run "$@"

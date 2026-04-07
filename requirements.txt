@@ -10,6 +10,7 @@ charset-normalizer==3.4.7
 chromadb==1.5.5
 click==8.3.1
 durationpy==0.10
+fastapi==0.115.12
 filelock==3.25.2
 flatbuffers==25.12.19
 fsspec==2026.3.0

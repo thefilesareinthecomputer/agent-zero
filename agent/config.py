@@ -26,6 +26,10 @@ TXTAI_DB_PATH: str = str(_project_root / os.getenv("TXTAI_DB_PATH", "data/txtai_
 KNOWLEDGE_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_PATH", "knowledge"))
 KNOWLEDGE_CANON_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_CANON_PATH", "knowledge_canon"))
 
+# API
+API_TOKEN: str = os.getenv("API_TOKEN", "")
+API_PORT: int = int(os.getenv("API_PORT", "8900"))
+
 # Voice
 VOICE_LANGUAGE: str = os.getenv("VOICE_LANGUAGE", "en")
 VOICE_MIN_RMS: float = float(os.getenv("VOICE_MIN_RMS", "0.01"))

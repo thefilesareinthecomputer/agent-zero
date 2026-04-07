@@ -17,7 +17,7 @@ returned as relative paths from the base directory (e.g. "projects/api.md").
 """
 
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -304,7 +304,46 @@ def save_file(filename: str, content: str, tags: list[str],
 
     file_content = _build_file(filename, content, tags, created or None)
     path.write_text(file_content, encoding="utf-8")
+
+    # Maintain index and log
+    rebuild_index(base_dir=base)
+    append_log("save", filename, tags=tags, base_dir=base)
+
     return str(path)
+
+
+def get_file_metadata(filename: str, *, base_dir: Path | None = None) -> dict | None:
+    """Return metadata for a single file without reading its full content.
+
+    Returns {filename, tags, created, last_modified} or None if not found.
+    """
+    base = base_dir or KNOWLEDGE_DIR
+    path = base / filename
+
+    if not path.exists():
+        return None
+
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError:
+        return None
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    meta, _ = _parse_frontmatter(text)
+    tags = meta.get("tags", []) or []
+    if not isinstance(tags, list):
+        tags = []
+
+    return {
+        "filename": _relative_name(path, base),
+        "tags": tags,
+        "created": str(meta.get("created", "")),
+        "last_modified": str(meta.get("last-modified", "")),
+    }
 
 
 def search_files(query: str, *, base_dir: Path | None = None) -> list[dict]:
@@ -342,3 +381,101 @@ def search_files(query: str, *, base_dir: Path | None = None) -> list[dict]:
             break
 
     return results
+
+
+def _extract_summary(body: str, max_len: int = 80) -> str:
+    """Extract a one-line summary from a file body.
+
+    Takes the first non-heading, non-TOC, non-divider line. Truncates to
+    max_len characters. Purely mechanical -- no LLM involved.
+    """
+    for line in body.strip().split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and "](#" in stripped:
+            continue
+        if stripped == "---":
+            continue
+        if len(stripped) > max_len:
+            return stripped[:max_len] + "..."
+        return stripped
+    return ""
+
+
+def rebuild_index(*, base_dir: Path | None = None) -> str:
+    """Rebuild the index.md catalog in the knowledge directory.
+
+    Lists every .md file (excluding index.md and log.md) with tags, a
+    mechanical summary, and last-modified date. Returns the path of the
+    written index file.
+    """
+    base = base_dir or KNOWLEDGE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+
+    files = []
+    for path in _iter_md_files(base):
+        rel = _relative_name(path, base)
+        if rel in ("index.md", "log.md"):
+            continue
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        meta, body = _parse_frontmatter(text)
+        tags = meta.get("tags", []) or []
+        if not isinstance(tags, list):
+            tags = []
+        modified = str(meta.get("last-modified", ""))
+        summary = _extract_summary(body)
+
+        files.append({
+            "filename": rel,
+            "tags": ", ".join(tags) if tags else "",
+            "summary": summary,
+            "modified": modified,
+        })
+
+    files.sort(key=lambda r: r["modified"], reverse=True)
+
+    lines = ["# Knowledge Index", ""]
+    lines.append("| File | Tags | Summary | Modified |")
+    lines.append("|------|------|---------|----------|")
+    for f in files:
+        lines.append(
+            f"| {f['filename']} | {f['tags']} | {f['summary']} | {f['modified']} |"
+        )
+    lines.append("")
+
+    index_path = base / "index.md"
+    index_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(index_path)
+
+
+def append_log(action: str, target: str, *,
+               tags: list[str] | None = None,
+               detail: str = "",
+               base_dir: Path | None = None) -> None:
+    """Append an entry to log.md in the knowledge directory.
+
+    Format: ## [2026-04-07 14:30] action | target | detail
+    """
+    base = base_dir or KNOWLEDGE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    parts = [f"## [{now}] {action} | {target}"]
+    if tags:
+        parts.append(f"tags: {', '.join(tags)}")
+    if detail:
+        parts.append(detail)
+
+    entry = " | ".join(parts) + "\n"
+
+    log_path = base / "log.md"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(entry)
