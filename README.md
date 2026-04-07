@@ -83,6 +83,8 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 |-------|------|--------|-----|
 | Agent framework | LangGraph | done | Industry standard. Persistence, streaming, tool orchestration. |
 | Claude Code bridge | `CLAUDE.md` files | done | Agent Zero writes project context that Claude Code Desktop reads automatically. No SDK, no CLI, no binary dependency. |
+| HTTP API | FastAPI + uvicorn | done | Privacy-preserving REST API on localhost:8900. Bearer token auth, knowledge CRUD, CLAUDE.md generation. |
+| KB infrastructure | index.md + log.md | done | Auto-maintained catalog and append-only audit trail (inspired by Karpathy LLM Wiki). |
 | Inference | Ollama | done | Model management, OpenAI-compatible API. |
 | Chat persistence | SQLite via `SqliteSaver` | done | Zero-infra, file-based. |
 | Vector memory | ChromaDB | done | Lightweight, local, Python-native. Semantic search over past interactions. |
@@ -117,6 +119,9 @@ agent-zero/
 │   └── run.py                    # CLI entry point, streaming, memory commands
 ├── bridge/
 │   ├── __init__.py
+│   ├── api.py                    # FastAPI app -- 7 routes, auth, privacy filtering
+│   ├── api_models.py             # Pydantic request/response schemas
+│   ├── api_run.py                # Uvicorn entry point (python -m bridge.api_run)
 │   └── claude_md.py              # CLAUDE.md assembler -- project-tagged knowledge to markdown
 ├── knowledge/
 │   ├── __init__.py
@@ -142,7 +147,10 @@ agent-zero/
 │   └── chroma_db/                # ChromaDB vector store
 ├── scripts/
 │   ├── az                        # CLI launcher (symlink to /usr/local/bin/az)
+│   ├── az-api                    # API server launcher (symlink to /usr/local/bin/az-api)
 │   └── setup_ollama.sh           # Ollama env vars + model pulls for M2 Ultra
+├── tests/
+│   └── test_api.py               # pytest suite -- auth, privacy, canon, traversal, CLAUDE.md
 └── claude/                       # Build state tracking, gitignored
     └── state.md
 ```
@@ -169,6 +177,10 @@ OLLAMA_BASE_URL=http://localhost:11434
 # Memory
 AGENT_DB_PATH=data/agent_memory.db
 CHROMA_DB_PATH=data/chroma_db
+
+# API
+API_TOKEN=<generated-via-secrets.token_urlsafe(32)>
+API_PORT=8900
 
 # Voice
 VOICE_LANGUAGE=en
@@ -235,11 +247,28 @@ What got built:
 - Full regeneration on each call -- no merge, no diffing
 - Only project-tagged files are included (no global/untagged files leak in)
 
-### Phase 3b: HTTP API -- NEXT
+### Phase 3b: HTTP API -- DONE
 
-Privacy-preserving local API for Claude Code to query Agent Zero's knowledge base.
+Privacy-preserving REST API for local tools to query Agent Zero's knowledge base. Completed April 7, 2026.
 
-### Phase 6: Voice
+What got built:
+- `bridge/api.py` -- FastAPI app with 7 routes: health, list, search, read, save, claude-md generate, claude-md write
+- `bridge/api_models.py` -- Pydantic request/response schemas with strict validation
+- `bridge/api_run.py` -- Uvicorn entry point, hardcoded to 127.0.0.1, token validation at startup
+- Bearer token auth (timing-safe via `secrets.compare_digest`, minimum 32 chars)
+- Privacy model: files tagged private/secret excluded from all responses, return 404 (not 403) to prevent enumeration
+- Merged listing: knowledge/ + knowledge_canon/ combined in responses with source tagging
+- CLAUDE.md iteration workflow: generate returns content as object, write accepts caller-modified content
+- `knowledge/knowledge_store.py` additions: `get_file_metadata()`, `rebuild_index()`, `append_log()`
+- `index.md` -- auto-maintained catalog rebuilt on every save (inspired by Karpathy LLM Wiki)
+- `log.md` -- append-only audit trail of all write operations
+- `scripts/az-api` -- launcher script (mirrors az pattern)
+- `tests/test_api.py` -- 28 pytest tests covering auth, privacy, canon blocks, path traversal, search, CLAUDE.md workflow
+- System prompt updated to reference index.md and encourage query-to-page persistence
+
+Inspirations: Karpathy's LLM Wiki (index/log/lint patterns), MemPalace (MCP server pattern).
+
+### Phase 6: Voice -- NEXT
 
 Independent of other phases, high daily-use value.
 
