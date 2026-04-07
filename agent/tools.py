@@ -68,32 +68,68 @@ def write_file(file_path: str, content: str) -> str:
 
 # -- Knowledge base tools --
 
+from agent.config import KNOWLEDGE_CANON_PATH
 from knowledge.knowledge_store import (
     list_files as _kb_list,
     read_file as _kb_read,
     save_file as _kb_save,
     search_files as _kb_search,
 )
+from bridge.claude_md import write_claude_md as _write_claude_md
+
+_CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
+
+
+def _is_canon_file(filename: str) -> bool:
+    """Check if a filename exists in the canon directory."""
+    return (_CANON_DIR / filename).exists()
+
+
+def _merged_list(**kwargs) -> list[dict]:
+    """List files from both knowledge/ and knowledge_canon/, merged.
+
+    Canon files are marked with source="canon". Knowledge files with
+    source="knowledge". Sorted by last_modified descending.
+    """
+    kb_files = _kb_list(**kwargs)
+    for f in kb_files:
+        f["source"] = "knowledge"
+
+    canon_files = _kb_list(base_dir=_CANON_DIR, **kwargs)
+    for f in canon_files:
+        f["source"] = "canon"
+
+    merged = kb_files + canon_files
+    merged.sort(key=lambda r: r["last_modified"], reverse=True)
+    return merged
 
 
 @tool
 def list_knowledge() -> str:
-    """List all knowledge base files with their tags and last-modified dates."""
-    files = _kb_list()
+    """List all knowledge base files with their tags and last-modified dates.
+    Includes both editable files and read-only canon files."""
+    files = _merged_list()
     if not files:
         return "Knowledge base is empty."
     lines = []
     for f in files:
         tags = ", ".join(f["tags"]) if f["tags"] else "no tags"
-        lines.append(f"{f['filename']}  [{tags}]  modified: {f['last_modified']}")
+        source = " [canon]" if f["source"] == "canon" else ""
+        lines.append(
+            f"{f['filename']}{source}  [{tags}]  modified: {f['last_modified']}"
+        )
     return "\n".join(lines)
 
 
 @tool
 def read_knowledge(filename: str) -> str:
-    """Read a knowledge base file by name. Returns the section content for
-    viewing or editing. Use list_knowledge to see available files."""
+    """Read a knowledge base file by name. Returns the section content.
+    Searches both editable and canon files. Use list_knowledge to see
+    available files."""
+    # Try knowledge/ first, then canon/
     content = _kb_read(filename)
+    if content is None:
+        content = _kb_read(filename, base_dir=_CANON_DIR)
     if content is None:
         return f"File not found: {filename}"
     if not content:
@@ -103,9 +139,16 @@ def read_knowledge(filename: str) -> str:
 
 @tool
 def search_knowledge(query: str) -> str:
-    """Search all knowledge base files for a keyword or phrase. Returns
-    matching filenames and lines."""
-    results = _kb_search(query)
+    """Search all knowledge base files for a keyword or phrase. Searches
+    both editable and canon files. Returns matching filenames and lines."""
+    kb_results = _kb_search(query)
+    canon_results = _kb_search(query, base_dir=_CANON_DIR)
+
+    # Tag canon results
+    for r in canon_results:
+        r["filename"] = r["filename"] + " [canon]"
+
+    results = kb_results + canon_results
     if not results:
         return f"No matches for '{query}' in knowledge base."
     lines = []
@@ -121,10 +164,32 @@ def save_knowledge(filename: str, content: str, tags: str) -> str:
     """Create or update a knowledge base file. Content should be organized as
     ## sections with text underneath. To edit an existing file, read it first
     with read_knowledge, make changes, then save the full updated content.
-    Tags are comma-separated (e.g. 'preferences, food')."""
+    Tags are comma-separated (e.g. 'preferences, food').
+    Cannot overwrite canon (read-only) files."""
+    # Block writes to files that exist in canon
+    if _is_canon_file(filename):
+        return f"Cannot save: {filename} is a canon file (read-only)."
+
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     try:
         path = _kb_save(filename, content, tag_list)
         return f"Saved: {path}"
     except Exception as e:
         return f"Error saving knowledge file: {e}"
+
+
+# -- CLAUDE.md bridge tools --
+
+
+@tool
+def update_project_context(project_path: str, project_name: str) -> str:
+    """Update the CLAUDE.md file in a project directory. Reads knowledge
+    files tagged with project:<project_name> from both editable and canon
+    knowledge, assembles a structured CLAUDE.md, and writes it to
+    project_path. Claude Code reads this file automatically at session start.
+    Files tagged private or secret are excluded."""
+    try:
+        path = _write_claude_md(project_path, project_name)
+        return f"Updated CLAUDE.md at {path}"
+    except Exception as e:
+        return f"Error updating project context: {e}"

@@ -47,7 +47,7 @@ Important:
 Examples:
 "my favorite color is blue" → user-preference/favorite-color, update
 "I also love sushi" → user-preference/favorite-food, addition
-"my name is Anton" → personal/identity, update
+"my name is Alex" → personal/identity, update
 "I like Monty Python" → user-preference/favorite-comedy, addition
 "actually my favorite band is Radiohead" → user-preference/favorite-music, update
 "remind me to buy groceries" → task/to-do, addition
@@ -100,6 +100,7 @@ def tag_message(user_msg: str) -> dict[str, str]:
         response = client.chat(
             model=FAST_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            options={"num_predict": 100},
         )
         raw = response.message.content.strip().lower()
 
@@ -152,6 +153,7 @@ def check_novelty(new_msg: str, existing_memories: list[str]) -> bool:
         response = client.chat(
             model=FAST_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            options={"num_predict": 20},
         )
         answer = response.message.content.strip().upper()
         return "YES" in answer

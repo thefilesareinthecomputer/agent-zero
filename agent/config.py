@@ -9,7 +9,7 @@ _project_root = Path(__file__).resolve().parent.parent
 load_dotenv(_project_root / ".env")
 
 # Models
-MAIN_MODEL: str = os.getenv("MAIN_MODEL", "gemma4:31b")
+MAIN_MODEL: str = os.getenv("MAIN_MODEL", "gemma4:26b")
 FAST_MODEL: str = os.getenv("FAST_MODEL", "gemma4:e2b")
 REASONING_MODEL: str = os.getenv("REASONING_MODEL", "llama3.3:70b")
 CODE_MODEL: str = os.getenv("CODE_MODEL", "qwen3-coder:30b")
@@ -24,6 +24,7 @@ AGENT_DB_PATH: str = str(_project_root / os.getenv("AGENT_DB_PATH", "data/agent_
 CHROMA_DB_PATH: str = str(_project_root / os.getenv("CHROMA_DB_PATH", "data/chroma_db"))
 TXTAI_DB_PATH: str = str(_project_root / os.getenv("TXTAI_DB_PATH", "data/txtai_db"))
 KNOWLEDGE_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_PATH", "knowledge"))
+KNOWLEDGE_CANON_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_CANON_PATH", "knowledge_canon"))
 
 # Voice
 VOICE_LANGUAGE: str = os.getenv("VOICE_LANGUAGE", "en")

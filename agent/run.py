@@ -2,8 +2,13 @@
 
 import uuid
 
+from pathlib import Path
+
 from agent.agent import create_agent
+from agent.config import KNOWLEDGE_CANON_PATH
 from knowledge.knowledge_store import list_files as kb_list_files
+
+_CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
 from memory.memory_manager import (
     forget_all,
     forget_last,
@@ -58,7 +63,17 @@ def _handle_command(user_input: str) -> bool:
         return True
 
     if cmd == "knowledge":
-        files = kb_list_files()
+        kb_files = kb_list_files()
+        canon_files = kb_list_files(base_dir=_CANON_DIR)
+
+        for f in kb_files:
+            f["source"] = ""
+        for f in canon_files:
+            f["source"] = " [canon]"
+
+        files = kb_files + canon_files
+        files.sort(key=lambda r: r["last_modified"], reverse=True)
+
         if not files:
             print("  (no knowledge files)")
         else:
@@ -66,7 +81,8 @@ def _handle_command(user_input: str) -> bool:
             for i, f in enumerate(files, 1):
                 tags = ", ".join(f["tags"]) if f["tags"] else "no tags"
                 name = f["filename"].replace(".md", "")
-                print(f"  {i}. {name}  [{tags}]  modified: {f['last_modified']}")
+                source = f["source"]
+                print(f"  {i}. {name}{source}  [{tags}]  modified: {f['last_modified']}")
         return True
 
     return False

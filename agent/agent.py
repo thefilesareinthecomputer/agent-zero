@@ -8,13 +8,18 @@ from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
-from agent.config import AGENT_DB_PATH, MAIN_MODEL, OLLAMA_BASE_URL
+from agent.config import (
+    AGENT_DB_PATH, KNOWLEDGE_CANON_PATH, MAIN_MODEL, OLLAMA_BASE_URL,
+)
 from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
     list_knowledge, read_knowledge, search_knowledge, save_knowledge,
+    update_project_context,
 )
 from knowledge.knowledge_store import search_files as kb_search
 from memory.memory_manager import get_relevant_context, memory_count
+
+_CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
 
 SYSTEM_PROMPT = (
     "You are Agent Zero, a local AI assistant running on Apple Silicon.\n\n"
@@ -27,14 +32,25 @@ SYSTEM_PROMPT = (
     "existing files to see if the topic is already covered. To edit an existing "
     "file, read it first, then save the full updated content. Prefer updating "
     "existing files over creating new ones for the same topic.\n\n"
+    "You can also update CLAUDE.md files in project directories using "
+    "update_project_context. This assembles relevant knowledge into a file "
+    "that Claude Code reads automatically. Tag knowledge files with "
+    "project:<name> to associate them with a specific project. Only files "
+    "with a matching project tag are included -- untagged files are not. "
+    "Files tagged private or secret are never included in CLAUDE.md.\n\n"
+    "Some knowledge files are marked [canon] -- these are read-only reference "
+    "files maintained by the user. You cannot edit or delete them. Treat canon "
+    "content as authoritative. They appear alongside regular files in list, "
+    "read, and search results.\n\n"
     "You have tools for: checking time, running shell commands, reading/writing "
-    "files, and managing your knowledge base. Use tools when they help. "
-    "Be direct and concise."
+    "files, managing your knowledge base, and updating project context. "
+    "Use tools when they help. Be direct and concise."
 )
 
 TOOLS = [
     get_current_time, run_shell_command, read_file, write_file,
     list_knowledge, read_knowledge, search_knowledge, save_knowledge,
+    update_project_context,
 ]
 
 
@@ -74,6 +90,18 @@ def _build_prompt(state: dict) -> list:
         except Exception:
             pass  # knowledge search failure should never block the agent
 
+        # Inject canon file hints
+        try:
+            canon_hits = kb_search(query, base_dir=_CANON_DIR)
+            if canon_hits:
+                file_list = ", ".join(r["filename"] for r in canon_hits)
+                system_content += (
+                    f"\n\nCanon knowledge files matching this query: {file_list}"
+                    "\nUse read_knowledge to view their contents if needed."
+                )
+        except Exception:
+            pass
+
     return [SystemMessage(content=system_content)] + list(messages)
 
 
@@ -94,7 +122,8 @@ def create_agent(
     llm = ChatOllama(
         model=model,
         base_url=OLLAMA_BASE_URL,
-        num_ctx=8192,
+        num_ctx=16384,
+        num_predict=2048,
     )
 
     conn = sqlite3.connect(db_path, check_same_thread=False)

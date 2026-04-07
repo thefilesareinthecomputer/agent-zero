@@ -1,12 +1,19 @@
-"""Knowledge base store -- manages a folder of Obsidian-compatible markdown files.
+"""Knowledge base store -- manages folders of markdown files, optionally
+Obsidian-compatible.
 
-Each file has:
-- YAML frontmatter (tags, created, last-modified)
-- H1 heading matching the filename
-- Auto-generated table of contents linking to H2 sections
-- H2 sections separated by --- dividers
+Supports two modes:
+- Agent-managed files (knowledge/): full read-write with frontmatter, TOC,
+  and section structure. The agent creates and edits these.
+- Drop-in files: any .md file placed in the directory (or subdirectories)
+  is discoverable via list, read, and search. Files without frontmatter
+  or H2 structure are returned as-is.
 
-The agent provides section content. This module handles the structure.
+All functions accept an optional base_dir parameter. This allows the same
+operations to work against knowledge/ (read-write) and knowledge_canon/
+(read-only) without code duplication.
+
+Recursive: all operations scan subdirectories (rglob). Filenames are
+returned as relative paths from the base directory (e.g. "projects/api.md").
 """
 
 import re
@@ -20,13 +27,36 @@ from agent.config import KNOWLEDGE_PATH
 KNOWLEDGE_DIR = Path(KNOWLEDGE_PATH)
 
 
-def _sanitize_filename(name: str) -> str:
-    """Normalize a filename to lowercase-hyphenated with .md extension."""
-    name = name.strip().lower()
-    name = re.sub(r"\.md$", "", name)
-    name = re.sub(r"[_\s]+", "-", name)
-    name = re.sub(r"[^a-z0-9-]", "", name)
-    return name + ".md"
+def _sanitize_path(name: str) -> str:
+    """Normalize a file path for saving. Sanitizes each component separately
+    to allow subdirectories (e.g. "projects/my file" -> "projects/my-file.md").
+    """
+    parts = Path(name).parts
+    sanitized = []
+    for i, part in enumerate(parts):
+        p = part.strip().lower()
+        if i == len(parts) - 1:
+            # Last component is the filename -- ensure .md extension
+            p = re.sub(r"\.md$", "", p)
+            p = re.sub(r"[_\s]+", "-", p)
+            p = re.sub(r"[^a-z0-9-]", "", p)
+            p = p + ".md"
+        else:
+            # Directory component
+            p = re.sub(r"[_\s]+", "-", p)
+            p = re.sub(r"[^a-z0-9-]", "", p)
+        if p:
+            sanitized.append(p)
+
+    return str(Path(*sanitized)) if sanitized else "untitled.md"
+
+
+def _relative_name(path: Path, base_dir: Path) -> str:
+    """Return the path relative to base_dir as a string."""
+    try:
+        return str(path.relative_to(base_dir))
+    except ValueError:
+        return path.name
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -50,12 +80,14 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def _extract_sections(body: str) -> str:
-    """Extract the H2 section content from a file body.
+    """Extract readable content from a file body.
 
-    Strips the H1 heading and TOC, returning everything from the first
-    H2 onward. This is what the agent edits and passes back to save_file.
+    For structured files (with H2 sections): returns everything from the
+    first H2 onward, stripping H1 and TOC.
+    For plain files (no H2 sections): returns the full body stripped of
+    any H1 heading.
     """
-    # Find the first ## heading
+    # Find the first ## heading preceded by a divider
     match = re.search(r"^---\s*\n##\s+", body, re.MULTILINE)
     if match:
         return body[match.start():].strip()
@@ -65,7 +97,7 @@ def _extract_sections(body: str) -> str:
     if match:
         return body[match.start():].strip()
 
-    # No sections found -- return body stripped of H1 and TOC
+    # No H2 sections -- return body stripped of H1 and TOC lines
     lines = body.strip().split("\n")
     content_lines = []
     past_toc = False
@@ -81,7 +113,13 @@ def _extract_sections(body: str) -> str:
             past_toc = True
             content_lines.append(line)
 
-    return "\n".join(content_lines).strip()
+    result = "\n".join(content_lines).strip()
+
+    # If stripping removed everything, return the raw body
+    if not result:
+        return body.strip()
+
+    return result
 
 
 def _build_toc(content: str) -> str:
@@ -104,7 +142,6 @@ def _ensure_section_dividers(content: str) -> str:
     result = []
     for i, line in enumerate(lines):
         if line.startswith("## "):
-            # Add divider before H2 if not already there
             if result and result[-1].strip() != "---":
                 result.append("")
                 result.append("---")
@@ -123,7 +160,8 @@ def _build_file(filename: str, content: str, tags: list[str],
         created: ISO date string. Defaults to today if None.
     """
     today = date.today().isoformat()
-    stem = filename.replace(".md", "")
+    # Use just the stem of the last path component for the H1
+    stem = Path(filename).stem
 
     meta = {
         "tags": tags,
@@ -131,7 +169,6 @@ def _build_file(filename: str, content: str, tags: list[str],
         "last-modified": today,
     }
 
-    # Build frontmatter
     fm_lines = ["---"]
     fm_lines.append("tags:")
     for tag in meta["tags"]:
@@ -141,13 +178,9 @@ def _build_file(filename: str, content: str, tags: list[str],
     fm_lines.append("---")
     frontmatter = "\n".join(fm_lines)
 
-    # Ensure dividers between sections
     content = _ensure_section_dividers(content)
-
-    # Build TOC
     toc = _build_toc(content)
 
-    # Assemble
     parts = [frontmatter, f"# {stem}"]
     if toc:
         parts.append(toc)
@@ -158,25 +191,48 @@ def _build_file(filename: str, content: str, tags: list[str],
     return "\n".join(parts)
 
 
-def list_files() -> list[dict]:
-    """List all knowledge base .md files with metadata.
+def _iter_md_files(base_dir: Path) -> list[Path]:
+    """Recursively find all .md files under base_dir."""
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return sorted(base_dir.rglob("*.md"))
+
+
+def list_files(*, filter_tags: list[str] | None = None,
+               exclude_tags: list[str] | None = None,
+               base_dir: Path | None = None) -> list[dict]:
+    """List .md files with metadata, optionally filtered by tags.
+
+    Scans recursively. Filenames are relative paths from base_dir.
+
+    Args:
+        filter_tags: If provided, only include files with at least one match.
+        exclude_tags: If provided, exclude files with any of these tags.
+        base_dir: Directory to scan. Defaults to KNOWLEDGE_DIR.
 
     Returns list of dicts: {filename, tags, created, last_modified, path}.
     Sorted by last_modified descending.
     """
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    base = base_dir or KNOWLEDGE_DIR
     results = []
 
-    for path in KNOWLEDGE_DIR.glob("*.md"):
+    for path in _iter_md_files(base):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
 
         meta, _ = _parse_frontmatter(text)
+        tags = meta.get("tags", []) or []
+
+        if exclude_tags and any(t in tags for t in exclude_tags):
+            continue
+
+        if filter_tags and not any(t in tags for t in filter_tags):
+            continue
+
         results.append({
-            "filename": path.name,
-            "tags": meta.get("tags", []),
+            "filename": _relative_name(path, base),
+            "tags": tags,
             "created": str(meta.get("created", "")),
             "last_modified": str(meta.get("last-modified", "")),
             "path": str(path),
@@ -186,17 +242,24 @@ def list_files() -> list[dict]:
     return results
 
 
-def read_file(filename: str) -> str | None:
-    """Read a knowledge file and return the editable section content.
+def read_file(filename: str, *, base_dir: Path | None = None) -> str | None:
+    """Read a knowledge file and return its content.
 
-    Returns the H2 sections (everything after frontmatter, H1, and TOC).
-    This is what the agent modifies and passes back to save_file.
+    For structured files: returns H2 sections (what the agent edits).
+    For plain files: returns the full body content.
+    Does NOT sanitize the filename -- reads it as-is to support drop-in files.
     Returns None if the file does not exist.
     """
-    filename = _sanitize_filename(filename)
-    path = KNOWLEDGE_DIR / filename
+    base = base_dir or KNOWLEDGE_DIR
+    path = base / filename
 
     if not path.exists():
+        return None
+
+    # Security: ensure the resolved path is under the base directory
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError:
         return None
 
     try:
@@ -208,24 +271,26 @@ def read_file(filename: str) -> str | None:
     return _extract_sections(body)
 
 
-def save_file(filename: str, content: str, tags: list[str]) -> str:
+def save_file(filename: str, content: str, tags: list[str],
+              *, base_dir: Path | None = None) -> str:
     """Create or update a knowledge file.
 
     The agent provides content as H2 sections with body text.
     This function wraps it with frontmatter, H1, and auto-generated TOC.
+    Sanitizes the filename. Creates subdirectories as needed.
 
     If the file already exists, the original created date is preserved.
 
-    Args:
-        filename: Name for the file (sanitized to lowercase-hyphens.md).
-        content: H2 section content from the agent.
-        tags: List of tag strings.
-
     Returns the path of the written file.
     """
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    filename = _sanitize_filename(filename)
-    path = KNOWLEDGE_DIR / filename
+    base = base_dir or KNOWLEDGE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+
+    filename = _sanitize_path(filename)
+    path = base / filename
+
+    # Create parent directories for nested paths
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     # Preserve created date from existing file
     created = None
@@ -242,17 +307,18 @@ def save_file(filename: str, content: str, tags: list[str]) -> str:
     return str(path)
 
 
-def search_files(query: str) -> list[dict]:
-    """Search all knowledge files for a keyword or phrase.
+def search_files(query: str, *, base_dir: Path | None = None) -> list[dict]:
+    """Search all .md files for a keyword or phrase.
 
-    Case-insensitive substring search across file content (not frontmatter).
-    Returns list of {filename, matching_lines}. Capped at 10 results.
+    Scans recursively. Case-insensitive substring search across content
+    (not frontmatter). Returns list of {filename, matching_lines}.
+    Capped at 10 results.
     """
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    base = base_dir or KNOWLEDGE_DIR
     query_lower = query.lower()
     results = []
 
-    for path in KNOWLEDGE_DIR.glob("*.md"):
+    for path in _iter_md_files(base):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -268,7 +334,7 @@ def search_files(query: str) -> list[dict]:
 
         if matches:
             results.append({
-                "filename": path.name,
+                "filename": _relative_name(path, base),
                 "matching_lines": matches[:5],
             })
 

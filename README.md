@@ -32,7 +32,7 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 | **Vision** | `qwen3-vl:30b` | ~18 GB | 128K | Image/document understanding. |
 | **Fine-tune target** | `gemma4:e4b` | ~3 GB | 128K | LoRA fine-tune locally via MLX. |
 
-**Memory rules for 64 GB:** one large model at a time. Main (26B MoE) + fast (E2B) ≈ 19 GB, leaving 45 GB for OS and context. Must set `num_ctx=8192` -- gemma4 defaults to 256K context which allocates 81 GB and crashes. Unload main before loading reasoning: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`
+**Memory rules for 64 GB:** one large model at a time. Main (26B MoE) + fast (E2B) ≈ 19 GB, leaving 45 GB for OS and context. Set `num_ctx=16384` for adequate conversation headroom (Ollama defaults to 2048-4096, not the model's 256K max capability). Set `num_predict=2048` to prevent output truncation (Ollama defaults to 128 tokens). Unload main before loading reasoning: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`
 
 
 ---
@@ -82,7 +82,7 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 | Layer | Tool | Status | Why |
 |-------|------|--------|-----|
 | Agent framework | LangGraph | done | Industry standard. Persistence, streaming, tool orchestration. |
-| Claude Code bridge | `CLAUDE.md` files | planned | Agent Zero writes project context that Claude Code Desktop reads automatically. No SDK, no CLI, no binary dependency. |
+| Claude Code bridge | `CLAUDE.md` files | done | Agent Zero writes project context that Claude Code Desktop reads automatically. No SDK, no CLI, no binary dependency. |
 | Inference | Ollama | done | Model management, OpenAI-compatible API. |
 | Chat persistence | SQLite via `SqliteSaver` | done | Zero-infra, file-based. |
 | Vector memory | ChromaDB | done | Lightweight, local, Python-native. Semantic search over past interactions. |
@@ -113,14 +113,20 @@ agent-zero/
 │   ├── __init__.py
 │   ├── agent.py                  # LangGraph ReAct agent, SQLite checkpointing, memory injection
 │   ├── config.py                 # .env-driven model routing
-│   ├── tools.py                  # @tool definitions (time, shell, file r/w)
+│   ├── tools.py                  # @tool definitions (time, shell, file r/w, knowledge, bridge)
 │   └── run.py                    # CLI entry point, streaming, memory commands
+├── bridge/
+│   ├── __init__.py
+│   └── claude_md.py              # CLAUDE.md assembler -- project-tagged knowledge to markdown
+├── knowledge/
+│   ├── __init__.py
+│   └── knowledge_store.py        # Obsidian markdown files -- list, read, save, search, tag filter
 ├── memory/
 │   ├── __init__.py
 │   ├── vector_store.py           # ChromaDB wrapper -- store, search, tag-filtered queries
 │   ├── tagger.py                 # LLM-based category/subcategory tagging + novelty checker (e2b)
 │   └── memory_manager.py         # Unified interface -- dedup, contradiction, novelty, pruning
-├── voice/                        # Phase 6 (next)
+├── voice/                        # Phase 6
 │   ├── __init__.py
 │   ├── stt.py                    # Whisper-MLX speech-to-text
 │   └── tts.py                    # macOS say text-to-speech
@@ -135,6 +141,7 @@ agent-zero/
 │   ├── agent_memory.db           # SQLite conversation persistence
 │   └── chroma_db/                # ChromaDB vector store
 ├── scripts/
+│   ├── az                        # CLI launcher (symlink to /usr/local/bin/az)
 │   └── setup_ollama.sh           # Ollama env vars + model pulls for M2 Ultra
 └── claude/                       # Build state tracking, gitignored
     └── state.md
@@ -187,7 +194,7 @@ launchctl setenv OLLAMA_HOST "127.0.0.1:11434"
 
 ## Build plan
 
-Each phase produces working, testable code before the next. Agreed build order: 1 > 2a > 6 > 3 > 2b > 4 > 7 > 5.
+Each phase produces working, testable code before the next. Agreed build order: 1 > 2a > 3 > 6 > 2b > 4 > 7 > 5.
 
 ### Phase 1: Foundation -- DONE
 
@@ -207,24 +214,40 @@ What got built:
 
 Key design decision: cosine distance alone cannot distinguish "noise about same topic" from "new details about same topic." Both land at similar distances. The distinction requires LLM judgment about information novelty, not threshold tuning. That is why additions go through `check_novelty()` via e2b rather than a distance cutoff.
 
-### Phase 6: Voice -- NEXT
+### Knowledge Base -- DONE
 
-Moved up from original position. Independent of other phases, high daily-use value.
+Obsidian-compatible markdown files managed by the agent. Completed April 6, 2026.
+
+What got built:
+- `knowledge/knowledge_store.py` -- list, read, save, search with YAML frontmatter and auto-generated TOC
+- Four agent tools: `list_knowledge`, `read_knowledge`, `search_knowledge`, `save_knowledge`
+- Tag filtering: `filter_tags` and `exclude_tags` keyword-only params on `list_files()`
+- Edit model: read-modify-write via `save_knowledge` (no delete tool)
+- Obsidian format: YAML frontmatter (tags, created, last-modified), H1 title, TOC, H2 sections with --- dividers
+
+### Phase 3a: CLAUDE.md Bridge -- DONE
+
+Agent Zero assembles knowledge base content into CLAUDE.md files for target project directories. Completed April 6, 2026.
+
+What got built:
+- `bridge/claude_md.py` -- collects files by `project:<name>` tag, excludes private/secret, 16KB size cap
+- `update_project_context` tool -- agent writes CLAUDE.md to any project directory
+- Full regeneration on each call -- no merge, no diffing
+- Only project-tagged files are included (no global/untagged files leak in)
+
+### Phase 3b: HTTP API -- NEXT
+
+Privacy-preserving local API for Claude Code to query Agent Zero's knowledge base.
+
+### Phase 6: Voice
+
+Independent of other phases, high daily-use value.
 
 1. `voice/stt.py` -- Whisper-MLX, proper VAD (webrtcvad or silero-vad) before STT
 2. `voice/tts.py` -- macOS `say`, configurable voice
 3. Wake word detection with start-of-utterance requirement
 4. Press-to-talk hotkey bypass
 5. Wire into `agent/run.py` as alternative input mode
-
-### Phase 3: CLAUDE.md context bridge (~2-3 days)
-
-Connect Agent Zero's memory to Claude Code Desktop.
-
-1. Build a tool or command that exports current project context from Agent Zero's memory into a `CLAUDE.md` file
-2. Include: architecture decisions, coding conventions, recent changes, known issues, active tasks
-3. Agent Zero auto-updates `CLAUDE.md` when significant decisions or context changes occur
-4. Claude Code Desktop reads this file at session start -- no SDK, no binary, just a markdown file
 
 ### Phase 4: Self-improvement (~2-3 weeks)
 
@@ -312,7 +335,7 @@ Workflow: prepare JSONL to train LoRA to export GGUF to `ollama create agent-zer
 
 ## Troubleshooting
 
-**gemma4 allocates 81GB and crashes (or swaps to disk):** gemma4 defaults to 256K context window, which requires ~81GB of KV cache on 64GB. Fix: set `num_ctx=8192` in ChatOllama constructor. Also set `OLLAMA_KV_CACHE_TYPE=q8_0` and `OLLAMA_FLASH_ATTENTION=1` via launchctl. After fix: ~30GB, 100% GPU.
+**High memory usage or swapping to disk:** Ollama defaults num_ctx to 2048-4096 (the 256K figure is the model's max capability, not Ollama's default). If you override num_ctx too high (e.g. 262144), the KV cache alone can exceed 64GB. Fix: set `num_ctx=16384` in ChatOllama constructor for adequate headroom. Also set `OLLAMA_KV_CACHE_TYPE=q8_0` and `OLLAMA_FLASH_ATTENTION=1` via launchctl. After fix: ~30GB, 100% GPU.
 
 **Ollama env vars not taking effect:** On macOS, Ollama runs as a launch agent. Regular `export` in your shell does not reach it. Use `launchctl setenv VAR_NAME "value"` then restart Ollama. This is required for `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_MAX_LOADED_MODELS`, etc.
 

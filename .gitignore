@@ -39,3 +39,6 @@ notes/
 *.log
 
 knowledge/*.md
+knowledge/**/*.md
+knowledge_canon/*.md
+knowledge_canon/**/*.md
