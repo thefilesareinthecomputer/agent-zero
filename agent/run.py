@@ -1,0 +1,159 @@
+"""Agent Zero CLI -- interactive loop with streaming responses and memory."""
+
+import uuid
+
+from agent.agent import create_agent
+from knowledge.knowledge_store import list_files as kb_list_files
+from memory.memory_manager import (
+    forget_all,
+    forget_last,
+    list_memories,
+    memory_count,
+    prune,
+    store_exchange,
+)
+
+
+def print_banner() -> None:
+    print()
+    print("  Agent Zero -- local AI agent")
+    print("  Commands: 'new' = new thread, 'quit' = exit")
+    print("  Memory:   'memories' = list recent, 'forget last' = delete last")
+    print("            'forget all' = wipe memory")
+    print("  Knowledge: 'knowledge' = list knowledge base files")
+    print()
+
+
+def _handle_command(user_input: str) -> bool:
+    """Handle CLI commands. Returns True if input was a command."""
+    cmd = user_input.lower().strip()
+
+    if cmd == "memories":
+        entries = list_memories(limit=10)
+        if not entries:
+            print("  (no memories)")
+        else:
+            print(f"  {memory_count()} total memories. Most recent:")
+            for i, entry in enumerate(entries, 1):
+                meta = entry.get("metadata", {})
+                tag = f"{meta.get('category', '?')}/{meta.get('subcategory', '?')}"
+                preview = entry["text"][:70].replace("\n", " ")
+                if len(entry["text"]) > 70:
+                    preview += "..."
+                print(f"  {i}. [{tag}] {preview}")
+        return True
+
+    if cmd == "forget last":
+        deleted = forget_last()
+        if deleted:
+            preview = deleted[:80].replace("\n", " ")
+            print(f"  Forgot: {preview}")
+        else:
+            print("  Nothing to forget.")
+        return True
+
+    if cmd == "forget all":
+        n = forget_all()
+        print(f"  Wiped {n} memories.")
+        return True
+
+    if cmd == "knowledge":
+        files = kb_list_files()
+        if not files:
+            print("  (no knowledge files)")
+        else:
+            print(f"  {len(files)} knowledge file(s):")
+            for i, f in enumerate(files, 1):
+                tags = ", ".join(f["tags"]) if f["tags"] else "no tags"
+                name = f["filename"].replace(".md", "")
+                print(f"  {i}. {name}  [{tags}]  modified: {f['last_modified']}")
+        return True
+
+    return False
+
+
+def run_cli() -> None:
+    print_banner()
+    print("Loading agent...")
+
+    agent, checkpointer = create_agent()
+
+    # Prune stale memories on startup
+    pruned = prune()
+    if pruned > 0:
+        print(f"Pruned {pruned} stale memories.")
+
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
+
+    print(f"Ready. Thread: {thread_id[:8]} | Memories: {memory_count()}")
+    print("-" * 40)
+
+    try:
+        while True:
+            try:
+                raw = input("\nYou: ")
+            except (KeyboardInterrupt, EOFError):
+                print("\nGoodbye.")
+                break
+
+            user_input = raw.strip()
+            if not user_input:
+                continue
+
+            if user_input.lower() == "quit":
+                print("Goodbye.")
+                break
+
+            if user_input.lower() == "new":
+                thread_id = str(uuid.uuid4())
+                config = {"configurable": {"thread_id": thread_id}}
+                print(f"New thread: {thread_id[:8]}")
+                continue
+
+            # CLI commands (memory, knowledge, etc.)
+            if _handle_command(user_input):
+                continue
+
+            messages = [{"role": "user", "content": user_input}]
+            agent_response = ""
+
+            try:
+                for chunk in agent.stream(
+                    {"messages": messages},
+                    config=config,
+                    stream_mode="updates",
+                ):
+                    for node_name, node_output in chunk.items():
+                        if "messages" not in node_output:
+                            continue
+                        for msg in node_output["messages"]:
+                            if msg.type == "ai":
+                                if msg.tool_calls:
+                                    for tc in msg.tool_calls:
+                                        print(f"  [calling {tc['name']}...]")
+                                elif msg.content:
+                                    agent_response = msg.content
+                                    print(f"\nAgent Zero: {msg.content}")
+                            elif msg.type == "tool":
+                                content = msg.content[:200]
+                                if len(msg.content) > 200:
+                                    content += "..."
+                                print(f"  [{msg.name}] {content}")
+
+                # Store the exchange in memory
+                if agent_response:
+                    store_exchange(user_input, agent_response, thread_id)
+
+            except KeyboardInterrupt:
+                print("\n(interrupted)")
+            except Exception as e:
+                print(f"\nError: {e}")
+
+    finally:
+        if hasattr(checkpointer, "conn"):
+            checkpointer.conn.close()
+
+
+if __name__ == "__main__":
+    run_cli()

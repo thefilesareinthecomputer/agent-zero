@@ -1,0 +1,41 @@
+# Environment & secrets
+.env
+
+# Virtual environment
+venv-agent-zero/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Data — SQLite, ChromaDB, txtai (auto-created, local only)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Claude Code — local state and project context
+claude/
+CLAUDE.md
+.claude/
+
+# Notes (local only)
+notes/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs & misc
+*.log
+
+knowledge/*.md
