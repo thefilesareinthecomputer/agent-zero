@@ -6,7 +6,6 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 
 **Created:** April 2026
 
-
 ---
 
 ## What it does
@@ -18,6 +17,7 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 - **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
 - **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
 
+![Agent Zero Web UI](static_assets/agent-zero-screenshot.png)
 
 ---
 
