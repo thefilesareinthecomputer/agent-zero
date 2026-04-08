@@ -1,38 +1,111 @@
-# Agent Zero -- Local AI Agent on Apple Silicon
+# Agent Zero
 
-Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Built with LangGraph, Ollama (MLX backend), and a layered memory system. Agent Zero is the persistent brain -- long-term memory, project context, decision history, general assistant. Claude Code Desktop is used alongside it for coding tasks -- Agent Zero maintains project context in `CLAUDE.md` files that Desktop reads automatically. Everything runs locally.
+A local AI agent built on LangGraph and Ollama. Persistent memory, a knowledge base, voice chat, and a web UI -- all running on your own hardware with no cloud dependencies.
 
-**Created:** April 2, 2026
+Designed to run alongside Claude Code: Agent Zero maintains project context in `CLAUDE.md` files that Claude Code reads automatically at session start. The two systems share a knowledge layer without any shared process or SDK dependency.
+
+**Created:** April 2026
+
+
+---
+
+## What it does
+
+- **Text chat** via browser (SSE streaming) or terminal CLI
+- **Voice chat** via WebSocket -- wake word detection, Whisper STT, macOS TTS
+- **Long-term memory** -- every conversation is embedded in ChromaDB with smart deduplication, contradiction detection, and LLM-based novelty filtering
+- **Knowledge base** -- Obsidian-compatible markdown files the agent reads and writes, tagged and searchable
+- **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
+- **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
+
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/thefilesareinthecomputer/agent-zero
+cd agent-zero
+
+python3.12 -m venv venv-agent-zero
+source venv-agent-zero/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# Edit .env: set API_TOKEN and review model names
+
+# Install and start Ollama, then pull models
+ollama pull gemma4:26b    # main model
+ollama pull gemma4:e2b    # memory tagger (lightweight)
+
+# Run the CLI
+python -m agent.run
+
+# Or run the web UI + API server
+python -m bridge.api_run
+# Opens at http://127.0.0.1:8900
+```
+
+For voice chat, also pull the voice model and set up Whisper:
+```bash
+ollama pull gemma4:e4b
+# Whisper-MLX downloads on first startup (Apple Silicon only)
+```
 
 
 ---
 
 ## Hardware
 
+### Minimum (text chat only)
+
+| | Requirement |
+|--|-------------|
+| RAM | 8 GB system memory |
+| Storage | 10 GB free (model weights) |
+| OS | macOS, Linux, or Windows |
+| CPU | Any modern multi-core |
+
+Run a small model like `gemma2:2b` or `phi3:mini` on Ollama. Text agent and web UI work anywhere Ollama does.
+
+### Recommended (comfortable daily use)
+
+| | Requirement |
+|--|-------------|
+| RAM | 16--32 GB unified or system memory |
+| Storage | 30 GB+ free |
+| OS | macOS (Sonoma or later) for voice; any OS for text |
+
+This range handles 7B--13B models with decent context windows and comfortable response times.
+
+### Reference build (full feature set, multiple concurrent models)
+
 | Component | Spec |
 |-----------|------|
-| Machine | Mac Studio |
-| Chip | M2 Ultra (24-core CPU, 60-core GPU) |
-| Memory | 64 GB unified (shared CPU/GPU, zero-copy with MLX) |
+| Chip | Apple M2 Ultra or equivalent |
+| Memory | 64 GB unified |
 | Storage | 1 TB SSD |
-| OS | macOS Tahoe 26.1 |
+| OS | macOS Tahoe |
+
+This configuration runs the 26B MoE main model, 2B tagger, voice model, and Whisper simultaneously (~22 GB total). Swap out models to fit your hardware -- the system is model-agnostic.
 
 
 ---
 
-## Models
+## Platform support
 
-| Role | Model | Size (Q4) | Context | Notes |
-|------|-------|-----------|---------|-------|
-| **Main (daily)** | `gemma4:26b` | ~17 GB | 256K | MoE, 4B active params. Faster and subjectively smarter than 31B dense. Daily driver. |
-| **Heavy** | `gemma4:31b` | ~20 GB | 256K | Dense, all 31B params active. Better benchmarks but too slow for interactive chat. Tool-heavy tasks. |
-| **Fast / Tagger** | `gemma4:e2b` | ~2 GB | 128K | Effective 2B params. Memory tagging, novelty checking, lightweight classification. |
-| **Reasoning** | `llama3.3:70b` | ~42 GB | 128K | Deep reasoning. Load on-demand, unload main first. |
-| **Code** | `qwen3-coder:30b` | ~18 GB | 128K | Code-specific tasks. |
-| **Vision** | `qwen3-vl:30b` | ~18 GB | 128K | Image/document understanding. |
-| **Fine-tune target** | `gemma4:e4b` | ~3 GB | 128K | LoRA fine-tune locally via MLX. |
+| Feature | macOS (Apple Silicon) | macOS (Intel) | Linux | Windows |
+|---------|:---------------------:|:-------------:|:-----:|:-------:|
+| Text agent + web UI | yes | yes | yes | yes |
+| REST API | yes | yes | yes | yes |
+| Voice (Whisper-MLX) | yes | -- | -- | -- |
+| Voice (standard Whisper) | yes | yes | yes | yes |
+| macOS `say` TTS | yes | yes | -- | -- |
+| `launchctl` Ollama env vars | yes | yes | -- | -- |
 
-**Memory rules for 64 GB:** one large model at a time. Main (26B MoE) + fast (E2B) ≈ 19 GB, leaving 45 GB for OS and context. Set `num_ctx=16384` for adequate conversation headroom (Ollama defaults to 2048-4096, not the model's 256K max capability). Set `num_predict=2048` to prevent output truncation (Ollama defaults to 128 tokens). Unload main before loading reasoning: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`
+**Linux/Windows voice:** replace `lightning-whisper-mlx` with `openai-whisper`, swap `voice/tts.py` for `pyttsx3` or `piper`, and set Ollama env vars via the system environment instead of `launchctl`. PRs welcome.
+
+**Ollama env vars on Linux/Windows:** export in your shell profile or set them as system environment variables -- `launchctl` is macOS-only.
 
 
 ---
@@ -41,19 +114,18 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 
 ```
                           ┌─────────┐
-                          │   User  │
+                          │   You   │
                           └────┬────┘
                           ┌────┴────┐
                  ┌────────┤         ├────────┐
                  │        └─────────┘        │
         ┌────────┴────────┐        ┌─────────┴─────────┐
-        │   Agent Zero    │        │  Claude Code       │
-        │  (always-on)    │        │  Desktop           │
-        │                 │        │  (user-driven)     │
-        │  LangGraph      │        │                    │
-        │  Ollama/Gemma4  │  ───►  │  Reads CLAUDE.md   │
-        │  Memory layer   │        │  written by        │
-        │  Tools          │        │  Agent Zero        │
+        │   Agent Zero    │        │   Claude Code      │
+        │  (always-on)    │        │   (user-driven)    │
+        │                 │        │                    │
+        │  LangGraph      │  ───►  │  Reads CLAUDE.md   │
+        │  Ollama/Gemma4  │        │  written by        │
+        │  Memory layer   │        │  Agent Zero        │
         │  Voice          │        │                    │
         └────────┬────────┘        └────────────────────┘
                  │
@@ -63,43 +135,30 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 │Ollama │ │  Memory   │ │ Tools  │
 │Gemma4 │ │ SQLite    │ │ shell  │
 │26B MoE│ │ ChromaDB  │ │ files  │
-│+ E2B  │ │           │ │        │
+│+ E2B  │ │           │ │ KB     │
 └───────┘ └───────────┘ └────────┘
 ```
 
-**How they work together:**
-- Agent Zero is the persistent brain -- runs locally, remembers everything, handles general tasks
-- Claude Code Desktop is a separate app you use for coding -- you drive it manually
-- Agent Zero writes/updates `CLAUDE.md` files with project context, architecture decisions, and conventions
-- Claude Code Desktop reads `CLAUDE.md` automatically at session start -- inherits Agent Zero's knowledge
-- You can ask Agent Zero to summarize context, then paste/reference it in Claude Code Desktop sessions
+Agent Zero runs persistently and remembers everything. Claude Code is a separate tool you use for coding -- it reads the `CLAUDE.md` files Agent Zero writes. Neither process runs inside the other.
 
 
 ---
 
-## Core stack
+## Models
 
-| Layer | Tool | Status | Why |
-|-------|------|--------|-----|
-| Agent framework | LangGraph | done | Industry standard. Persistence, streaming, tool orchestration. |
-| Claude Code bridge | `CLAUDE.md` files | done | Agent Zero writes project context that Claude Code Desktop reads automatically. No SDK, no CLI, no binary dependency. |
-| HTTP API | FastAPI + uvicorn | done | Privacy-preserving REST API on localhost:8900. Bearer token auth, knowledge CRUD, CLAUDE.md generation. |
-| KB infrastructure | index.md + log.md | done | Auto-maintained catalog and append-only audit trail (inspired by Karpathy LLM Wiki). |
-| Inference | Ollama | done | Model management, OpenAI-compatible API. |
-| Chat persistence | SQLite via `SqliteSaver` | done | Zero-infra, file-based. |
-| Vector memory | ChromaDB | done | Lightweight, local, Python-native. Semantic search over past interactions. |
-| Memory tagging | Ollama (e2b) | done | Category/subcategory classification + update/addition intent via lightweight LLM. |
-| Novelty checking | Ollama (e2b) | done | LLM-based judgment for whether new info adds value beyond existing memories. |
-| Semantic + graph | txtai | planned | Embeddings + graph + SQL in one package. Knowledge graph without a separate DB. |
-| Prompt optimization | DSPy GEPA | planned | Evolves prompts via reflection on execution traces. No weight changes. |
-| Agent optimization | Microsoft Agent Lightning | planned | Framework-agnostic. Prompt optimization + optional RL. Works with LangGraph. |
-| Local fine-tuning | MLX + mlx-lm | planned | Native Apple Silicon LoRA/QLoRA. Up to ~30B on 64GB. |
-| Cloud fine-tuning | Unsloth + Google Colab | planned | Free T4 GPU for bigger experiments. Export GGUF to Ollama. |
-| Voice STT | Whisper-MLX (lightning-whisper-mlx) | done | Runs on Metal. distil-large-v3 default. Warm-up on startup. |
-| Voice TTS | macOS `say` | done | Sentence-chunked streaming. 16kHz PCM over WebSocket. |
-| Voice VAD | Silero-VAD | done | ONNX, 512-sample frames at 16kHz. |
-| Web UI | Vanilla HTML/CSS/JS | done | Dark theme SPA served by FastAPI. SSE text chat, WebSocket voice. |
-| Web browsing | Crawl4AI | planned | Local-first, async, LLM-friendly extraction. |
+| Role | Default | Size (Q4) | Notes |
+|------|---------|-----------|-------|
+| Main (text chat) | `gemma4:26b` | ~17 GB | MoE, 4B active params. Fast + capable. |
+| Voice | `gemma4:e4b` | ~3 GB | Short answers, commands. Web voice chat. |
+| Tagger | `gemma4:e2b` | ~2 GB | Memory classification, novelty checking. |
+| Heavy | `gemma4:31b` | ~20 GB | Dense. Available on-demand for complex tasks. |
+| Reasoning | `llama3.3:70b` | ~42 GB | Load on-demand, unload main first. |
+| Code | `qwen3-coder:30b` | ~18 GB | Code-specific tasks. |
+| Vision | `qwen3-vl:30b` | ~18 GB | Image/document understanding. |
+
+**Running on less RAM:** swap the main model for something smaller. `gemma2:9b`, `mistral:7b`, or `phi3:medium` all work -- change `MAIN_MODEL` in `.env`. The architecture is model-agnostic.
+
+**Memory headroom on 64 GB:** main (26B MoE) + tagger (E2B) + voice (E4B) + Whisper ≈ 22 GB. Set `num_ctx=16384` -- Ollama defaults to 2048--4096, not the model's full 256K capability. Unload the main model before loading 70B: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`
 
 
 ---
@@ -108,64 +167,52 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 
 ```
 agent-zero/
-├── .env                          # Model config, Ollama URL, DB paths, voice params
+├── .env.example                  # Copy to .env and fill in your values
 ├── .python-version               # 3.12
-├── requirements.txt              # Pinned Python deps
-├── README.md                     # This file
-├── CLAUDE.md                     # Project context for Claude Code Desktop
+├── requirements.txt              # Pinned deps (pip freeze)
 ├── agent/
-│   ├── __init__.py
 │   ├── agent.py                  # LangGraph ReAct agent, SQLite checkpointing, memory injection
-│   ├── config.py                 # .env-driven model routing
-│   ├── tools.py                  # @tool definitions (time, shell, file r/w, knowledge, bridge)
-│   └── run.py                    # CLI entry point, streaming, memory commands
+│   ├── config.py                 # .env-driven config
+│   ├── tools.py                  # @tool definitions: time, shell, files, knowledge base, bridge
+│   └── run.py                    # CLI entry point with streaming and memory commands
 ├── bridge/
-│   ├── __init__.py
-│   ├── api.py                    # FastAPI app -- 7 routes, auth, privacy filtering
-│   ├── api_models.py             # Pydantic request/response schemas
-│   ├── api_run.py                # Uvicorn entry point (python -m bridge.api_run)
-│   └── claude_md.py              # CLAUDE.md assembler -- project-tagged knowledge to markdown
+│   ├── api.py                    # FastAPI app -- knowledge CRUD, CLAUDE.md generation, chat
+│   ├── api_models.py             # Pydantic schemas
+│   ├── api_run.py                # Uvicorn entry point
+│   ├── chat.py                   # SSE text chat + WebSocket voice endpoints
+│   └── claude_md.py              # CLAUDE.md assembler -- scored, budget-aware
 ├── knowledge/
-│   ├── __init__.py
-│   └── knowledge_store.py        # Obsidian markdown files -- list, read, save, search, tag filter
+│   └── knowledge_store.py        # Markdown KB: list, read, save, search, tag filter
 ├── memory/
-│   ├── __init__.py
-│   ├── vector_store.py           # ChromaDB wrapper -- store, search, tag-filtered queries
-│   ├── tagger.py                 # LLM-based category/subcategory tagging + novelty checker (e2b)
-│   └── memory_manager.py         # Unified interface -- dedup, contradiction, novelty, pruning
+│   ├── vector_store.py           # ChromaDB wrapper
+│   ├── tagger.py                 # LLM-based category/subcategory tagging + novelty check
+│   └── memory_manager.py         # Pipeline: noise filter, dedup, contradiction, novelty, prune
 ├── voice/
-│   ├── __init__.py
-│   ├── vad.py                    # Silero-VAD state machine (IDLE/SPEAKING/COMPLETE)
-│   ├── stt.py                    # Whisper-MLX STT -- preload, warm-up, wake word extraction
-│   ├── tts.py                    # macOS say TTS -- sentence-chunked streaming PCM
-│   └── pipeline.py               # Full voice pipeline -- VAD -> STT -> wake word -> query
+│   ├── vad.py                    # Silero-VAD state machine
+│   ├── stt.py                    # Whisper-MLX STT + wake word extraction
+│   ├── tts.py                    # macOS say TTS, sentence-chunked PCM streaming
+│   └── pipeline.py               # VAD -> STT -> wake word -> query, echo cancellation
 ├── ui/
 │   ├── index.html                # Single-page dark theme UI
-│   ├── style.css                 # Minimalist dark CSS
-│   ├── app.js                    # Auth, SSE chat, WebSocket voice, audio playback
-│   ├── audio-worklet.js          # AudioWorklet: float32 -> PCM16, 512-sample buffering
-│   └── sounds/
-│       └── ready.wav             # Wake word confirmation tone
-├── optimization/                 # Phase 4
-│   ├── __init__.py
-│   ├── dspy_optimizer.py         # GEPA prompt evolution
-│   └── agent_lightning.py        # Agent Lightning integration
-├── fine_tuning/                  # Phase 5
-│   ├── prepare_data.py           # Extract training data from interaction logs
-│   └── train_mlx.py             # MLX LoRA fine-tuning script
-├── data/                         # Auto-created, gitignored
-│   ├── agent_memory.db           # SQLite conversation persistence
-│   └── chroma_db/                # ChromaDB vector store
+│   ├── style.css
+│   ├── app.js                    # SSE chat, WebSocket voice, audio playback
+│   ├── audio-worklet.js          # float32 -> PCM16, 512-sample buffering
+│   └── sounds/ready.wav          # Wake word confirmation tone
 ├── scripts/
 │   ├── az                        # CLI launcher (symlink to /usr/local/bin/az)
-│   ├── az-api                    # API server launcher (symlink to /usr/local/bin/az-api)
-│   └── setup_ollama.sh           # Ollama env vars + model pulls for M2 Ultra
+│   ├── az-api                    # API server launcher
+│   └── setup_ollama.sh           # Ollama env var setup for Apple Silicon
+├── project_outputs/              # Default output dir for generated CLAUDE.md files
 ├── tests/
-│   ├── test_api.py               # pytest suite -- auth, privacy, canon, traversal, CLAUDE.md
-│   ├── test_voice.py             # voice unit tests -- VAD, wake word, TTS, echo suppression
-│   └── test_chat_api.py          # chat API tests -- SSE auth, WebSocket auth, static serving
-└── claude/                       # Build state tracking, gitignored
-    └── state.md
+│   ├── test_api.py               # Knowledge CRUD, auth, privacy, CLAUDE.md routes (28 tests)
+│   ├── test_chat_api.py          # SSE auth, WebSocket auth, static serving (10 tests)
+│   ├── test_claude_md.py         # Bridge scoring, budget, path resolution (18 tests)
+│   ├── test_knowledge_store.py   # KB file ops, frontmatter, search, index, log (38 tests)
+│   ├── test_memory_manager.py    # Memory pipeline, dedup, contradiction, pruning (23 tests)
+│   └── test_voice.py             # VAD, wake word, TTS, echo suppression (14 tests)
+├── optimization/                 # Phase 4 -- DSPy GEPA prompt evolution (planned)
+├── fine_tuning/                  # Phase 5 -- MLX LoRA fine-tuning (planned)
+└── data/                         # Auto-created, gitignored -- SQLite DB, ChromaDB
 ```
 
 
@@ -173,10 +220,10 @@ agent-zero/
 
 ## Configuration
 
-### .env
+Copy `.env.example` to `.env` and fill in your values.
 
 ```bash
-# Models (Ollama)
+# Models -- swap for smaller ones on limited hardware
 MAIN_MODEL=gemma4:26b
 FAST_MODEL=gemma4:e2b
 REASONING_MODEL=llama3.3:70b
@@ -187,30 +234,32 @@ FINETUNE_MODEL=gemma4:e4b
 # Ollama
 OLLAMA_BASE_URL=http://localhost:11434
 
-# Memory
+# Paths (relative to project root)
 AGENT_DB_PATH=data/agent_memory.db
 CHROMA_DB_PATH=data/chroma_db
 
-# API
-API_TOKEN=<generated-via-secrets.token_urlsafe(32)>
+# API -- generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+API_TOKEN=your_token_here_min_32_chars
 API_PORT=8900
 
-# Voice
+# Bridge output directory for generated CLAUDE.md files
+PROJECT_OUTPUTS_PATH=project_outputs
+CLAUDE_MD_MAX_CHARS=65536
+
+# Voice (macOS only)
 VOICE_MODEL=gemma4:e4b
-VOICE_LANGUAGE=en
-VOICE_MIN_RMS=0.01
-VOICE_CHUNK_SECONDS=3
-VOICE_INPUT_GAIN=1.0
 WHISPER_MODEL=distil-large-v3
 TTS_VOICE=Samantha
 TTS_RATE=175
 VAD_THRESHOLD=0.5
 VAD_SILENCE_MS=1000
 MAX_SPEECH_SECONDS=30
-```
+VOICE_INPUT_GAIN=1.0
 ```
 
-### Ollama (M2 Ultra 64GB)
+### Ollama on Apple Silicon
+
+Set these via `launchctl` (not `export`) so the Ollama launch agent picks them up:
 
 ```bash
 launchctl setenv OLLAMA_MAX_LOADED_MODELS "2"
@@ -221,220 +270,155 @@ launchctl setenv OLLAMA_KV_CACHE_TYPE "q8_0"
 launchctl setenv OLLAMA_HOST "127.0.0.1:11434"
 ```
 
+On Linux/Windows, set these as normal environment variables or in a systemd unit file.
+
+### Telemetry note
+
+`langsmith` is a transitive dependency of LangGraph. By default it does nothing -- tracing only activates if you set `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY`. To be explicit, add `LANGCHAIN_TRACING_V2=false` to your `.env`.
+
 
 ---
 
-## Build plan
+## Launchers
 
-Each phase produces working, testable code before the next. Agreed build order: 1 > 2a > 3 > 6 > 2b > 4 > 7 > 5.
+```bash
+# Symlink for convenient CLI access (optional)
+ln -sf "$(pwd)/scripts/az" /usr/local/bin/az
+ln -sf "$(pwd)/scripts/az-api" /usr/local/bin/az-api
 
-### Phase 1: Foundation -- DONE
+az          # run the CLI agent
+az-api      # run the web UI + API server
+```
 
-LangGraph ReAct agent with ChatOllama, four tools (time, shell, file read, file write), SQLite checkpointing, CLI with streaming and thread switching. Completed April 2, 2026.
+CLI memory commands: `memories`, `forget last`, `forget all`, `knowledge`
 
-### Phase 2a: Memory (ChromaDB + smart dedup) -- DONE
+CLI thread commands: `new` (start fresh thread), `quit`
 
-Vector memory with intelligent storage pipeline. Completed April 3, 2026.
 
-What got built:
-- `memory/vector_store.py` -- ChromaDB persistent store with cosine distance, tag-filtered search via `where` clauses
-- `memory/tagger.py` -- e2b classifies every message into category/subcategory (e.g. `user-preference/favorite-color`) plus update/addition intent
-- `memory/memory_manager.py` -- five-stage pipeline: noise filter (< 3 words skipped), tagging, dedup (distance < 0.15 refreshes timestamp), contradiction replacement (updates within same subcategory, distance < 0.50), LLM novelty check (additions ask e2b "does this add new info beyond what's already stored?")
-- Wired into agent.py via callable prompt that retrieves top-5 memories per query
-- CLI commands: `memories`, `forget last`, `forget all`
-- Pruning: 30-day TTL, 500 memory hard cap, runs on startup
+---
 
-Key design decision: cosine distance alone cannot distinguish "noise about same topic" from "new details about same topic." Both land at similar distances. The distinction requires LLM judgment about information novelty, not threshold tuning. That is why additions go through `check_novelty()` via e2b rather than a distance cutoff.
+## Build status
 
-### Knowledge Base -- DONE
-
-Obsidian-compatible markdown files managed by the agent. Completed April 6, 2026.
-
-What got built:
-- `knowledge/knowledge_store.py` -- list, read, save, search with YAML frontmatter and auto-generated TOC
-- Four agent tools: `list_knowledge`, `read_knowledge`, `search_knowledge`, `save_knowledge`
-- Tag filtering: `filter_tags` and `exclude_tags` keyword-only params on `list_files()`
-- Edit model: read-modify-write via `save_knowledge` (no delete tool)
-- Obsidian format: YAML frontmatter (tags, created, last-modified), H1 title, TOC, H2 sections with --- dividers
-
-### Phase 3a: CLAUDE.md Bridge -- DONE
-
-Agent Zero assembles knowledge base content into CLAUDE.md files for target project directories. Completed April 6, 2026.
-
-What got built:
-- `bridge/claude_md.py` -- collects files by `project:<name>` tag, excludes private/secret, 16KB size cap
-- `update_project_context` tool -- agent writes CLAUDE.md to any project directory
-- Full regeneration on each call -- no merge, no diffing
-- Only project-tagged files are included (no global/untagged files leak in)
-
-### Phase 6: Voice + Web UI -- DONE
-
-Browser-based chat interface with text and voice, served from the same FastAPI process. Completed April 7, 2026.
-
-What got built:
-- `voice/vad.py` -- Silero-VAD state machine. 512-sample frames at 16kHz. IDLE/SPEAKING/TRAILING_SILENCE/COMPLETE states. Max 30s speech cap.
-- `voice/stt.py` -- Whisper-MLX wrapper (distil-large-v3). Preloaded and warmed on startup. `extract_after_wake_word()` strips "hey zero" prefix from transcript.
-- `voice/tts.py` -- macOS `say` wrapper. Sentence-chunked streaming: each sentence synthesized and sent independently for ~200ms first-audio latency.
-- `voice/pipeline.py` -- Integration layer. Handles echo cancellation (discards mic frames while TTS plays), backpressure (discards frames during agent processing).
-- `bridge/chat.py` -- FastAPI router with POST /chat (SSE streaming) and WS /ws/audio (voice pipeline). gemma4:26b for text, gemma4:e4b for voice. Shared asyncio.Lock. Stores exchanges to memory after completion.
-- `bridge/api.py` -- Extended lifespan: inits both agents (async), preloads Whisper. Mounts /ui static files. Health endpoint reports voice readiness.
-- `ui/` -- Vanilla HTML/CSS/JS SPA. Dark theme. Token in localStorage. SSE streams text tokens. WebSocket streams PCM audio frames. AudioWorklet buffers 512 samples. TTS audio plays via Web Audio API.
-
-Key implementation notes:
-- `AsyncSqliteSaver` (not `SqliteSaver`) enables native `agent.astream()` in async handlers -- no thread bridge needed
-- `ws.binaryType = 'arraybuffer'` required or TTS binary frames arrive as Blob and audio is silent
-- `AudioContext({ sampleRate: 16000 })` -- browser resamples from hardware rate internally
-- openWakeWord has no built-in "hey zero" model; wake word detection is Whisper + `extract_after_wake_word()`
-
-### Phase 3b: HTTP API -- DONE
-
-Privacy-preserving REST API for local tools to query Agent Zero's knowledge base. Completed April 7, 2026.
-
-What got built:
-- `bridge/api.py` -- FastAPI app with 7 routes: health, list, search, read, save, claude-md generate, claude-md write
-- `bridge/api_models.py` -- Pydantic request/response schemas with strict validation
-- `bridge/api_run.py` -- Uvicorn entry point, hardcoded to 127.0.0.1, token validation at startup
-- Bearer token auth (timing-safe via `secrets.compare_digest`, minimum 32 chars)
-- Privacy model: files tagged private/secret excluded from all responses, return 404 (not 403) to prevent enumeration
-- Merged listing: knowledge/ + knowledge_canon/ combined in responses with source tagging
-- CLAUDE.md iteration workflow: generate returns content as object, write accepts caller-modified content
-- `knowledge/knowledge_store.py` additions: `get_file_metadata()`, `rebuild_index()`, `append_log()`
-- `index.md` -- auto-maintained catalog rebuilt on every save (inspired by Karpathy LLM Wiki)
-- `log.md` -- append-only audit trail of all write operations
-- `scripts/az-api` -- launcher script (mirrors az pattern)
-- `tests/test_api.py` -- 28 pytest tests covering auth, privacy, canon blocks, path traversal, search, CLAUDE.md workflow
-- System prompt updated to reference index.md and encourage query-to-page persistence
-
-Inspirations: Karpathy's LLM Wiki (index/log/lint patterns), MemPalace (MCP server pattern).
-
-### Phase 6: Voice -- NEXT
-
-Independent of other phases, high daily-use value.
-
-1. `voice/stt.py` -- Whisper-MLX, proper VAD (webrtcvad or silero-vad) before STT
-2. `voice/tts.py` -- macOS `say`, configurable voice
-3. Wake word detection with start-of-utterance requirement
-4. Press-to-talk hotkey bypass
-5. Wire into `agent/run.py` as alternative input mode
-
-### Phase 4: Self-improvement (~2-3 weeks)
-
-Two parallel tracks.
-
-**Track A -- DSPy GEPA (prompt evolution):**
-1. Add to `requirements.txt`: `dspy-ai`, `gepa`
-2. Define Agent Zero's task signatures as DSPy modules (tool selection, response quality, memory retrieval accuracy)
-3. Build evaluation metrics with textual feedback
-4. Run GEPA with gemma4:31b as both student and reflection LM
-5. Store optimized prompts, swap them into Agent Zero's system prompt
-
-**Track B -- Agent Lightning (agent optimization):**
-1. Add to `requirements.txt`: `agentlightning`
-2. Add `agl.emit()` trace collectors to LangGraph execution
-3. Start with prompt optimization mode (no RL infra)
-4. Define reward functions: task completion, tool accuracy, memory relevance
-5. Let Agent Lightning analyze traces and propose improvements
-
-### Phase 5: Fine-tuning (~1-2 weeks)
-
-Train a custom model on Agent Zero's interaction data.
-
-**Local (MLX):**
-1. `pip install mlx mlx-lm`
-2. Build `fine_tuning/prepare_data.py` -- extract interaction logs from SQLite to instruction/input/output JSONL
-3. QLoRA fine-tune gemma4:e4b (~3 GB base, fits easily in 64 GB)
-4. Export LoRA adapter to GGUF to Ollama Modelfile
-5. A/B test fine-tuned model vs base
-
-**Colab (Unsloth) -- for larger models:**
-1. Open Unsloth notebook in Google Colab (free T4)
-2. Upload training data, fine-tune with QLoRA, export GGUF
-3. `ollama create agent-zero-custom -f Modelfile`
-
-### Phase 2b: Memory (txtai / knowledge graph) -- IF NEEDED
-
-Add txtai for graph relationships and semantic SQL if ChromaDB alone proves insufficient. Evaluate after more real usage.
-
-### Phase 7: Web + expanded tools (~1-2 weeks)
-
-1. Add to `requirements.txt`: `crawl4ai`
-2. Add web search and page fetch as LangGraph tools
-3. Feed browser-extracted content into memory pipeline (summarize to embed to store)
-4. Expand tools: calendar, clipboard, Finder integration via macOS APIs
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 1: Foundation | done | LangGraph ReAct agent, tools, CLI, SQLite persistence |
+| 2a: Memory | done | ChromaDB, tagging, dedup, contradiction, novelty, pruning |
+| KB: Knowledge base | done | Obsidian markdown, tag filtering, auto index/log |
+| 3a: CLAUDE.md bridge | done | Project-tagged KB → CLAUDE.md, scored + budget-aware |
+| 3b: HTTP API | done | FastAPI, auth, privacy filtering, CRUD, 150 tests passing |
+| 6: Voice + Web UI | done | Whisper STT, macOS TTS, VAD, SSE chat, WebSocket voice |
+| 2b: Memory (txtai) | planned | Graph relationships + semantic SQL if ChromaDB proves insufficient |
+| 4: Self-improvement | planned | DSPy GEPA prompt evolution |
+| 7: Web tools | planned | Crawl4AI, calendar, clipboard |
+| 5: Fine-tuning | planned | MLX LoRA on interaction data |
 
 
 ---
 
 ## Technical decisions
 
-**Why gemma4:26b MoE over 31B Dense for daily use:** 26B MoE has 26B total params but only 4B active per token. In practice it is significantly faster than the 31B dense model while being subjectively smarter and more honest in conversation. The 31B dense model is still available for heavy tasks but too slow for interactive chat. 31B remains the better fine-tuning base since QLoRA is well-supported on dense architectures and MoE fine-tuning requires expert profiling with sparse gradient issues.
+**Why LLM novelty checking instead of cosine thresholds for memory**
 
-**Why LLM novelty checking over cosine thresholds:** During memory development, cosine distance alone kept failing. "I love pizza" and "I love pepperoni with hot honey on pizza" land at similar distances -- the vector can tell they are about the same topic but not whether the second adds new information. A fixed threshold either eats real details or lets noise through. The solution: ask e2b (the fast model) "does this add new info beyond what's already stored?" This handles the information/noise distinction that similarity scores fundamentally cannot.
+Cosine distance tells you whether two texts are about the same topic -- it does not tell you whether one adds new information beyond the other. "My favorite color is blue" and "My favorite color is blue, specifically cobalt, not navy" land at very similar distances. A fixed threshold either discards real details or lets noise through. The solution is to ask the fast model (E2B) directly: "does this add new information?" That judgment requires language understanding, not vector arithmetic.
 
-**Why category/subcategory tagging:** Scoping memory comparisons to the same subcategory prevents cross-topic collisions. Without tags, "my favorite color is green" could collide with "I like green tea." The two-level taxonomy (e.g. `user-preference/favorite-color`) keeps comparisons meaningful. Update vs addition intent prevents additions from triggering contradiction replacement -- "I also like sushi" should not replace "I love pizza" even though both are `favorite-food`.
+**Why category/subcategory tagging**
 
-**Why Claude Code Desktop (not CLI, not Agent SDK):** The CLI and Agent SDK give Anthropic's binary headless execution on your machine with phone-home mechanisms. The Desktop app is sandboxed in its own GUI where you see everything it does. The `CLAUDE.md` bridge gives Claude Code Desktop project context from Agent Zero without any Anthropic binary running in your agent's process. Trade-off: no programmatic delegation, but full visibility and zero hidden binary execution.
+Without scoped comparisons, "my favorite color is green" collides with "I like green tea" -- both mention green, both land nearby. The two-level taxonomy (`user-preference/favorite-color`, `user-preference/favorite-food`) keeps comparisons semantically grounded. Update vs. addition intent prevents additions from triggering contradiction replacement -- "I also like sushi" should stack alongside "I love pizza," not replace it.
 
-**Why Ollama:** Model management, OpenAI-compatible API, one-command pulls. MLX backend switch (March 2026 preview) gives ~3x speedup on Apple Silicon. Speculative decoding coming but not merged yet.
+**Why `langchain-ollama` not `langchain-community`**
 
-**Why DSPy GEPA + Agent Lightning:** GEPA evolves prompts by reflecting on failures -- no weight changes, works with any model. Agent Lightning wraps around LangGraph with near-zero code changes, supports prompt optimization + optional RL. Complementary.
+The community `ChatOllama` throws `NotImplementedError` on `bind_tools()`. `langchain-ollama` is the maintained package with proper tool calling support.
 
-**Why ChromaDB:** Simplest vector store -- Python-native, local, no server. txtai may be added later for graph relationships and semantic SQL if needed, but ChromaDB with LLM-based novelty checking has been sufficient so far.
+**Why `AsyncSqliteSaver` in the web server**
 
-**Why `langchain-ollama` not `langchain-community`:** The community `ChatOllama` throws `NotImplementedError` on `bind_tools()`. Only `langchain-ollama` supports tool calling.
+The CLI uses sync `SqliteSaver`. The web server uses `AsyncSqliteSaver` so `agent.astream()` works natively in async FastAPI handlers without a thread bridge. Do not mix the two.
 
-**Why MLX for fine-tuning:** Apple's framework, built for unified memory. Zero-copy CPU/GPU. LoRA/QLoRA up to ~30B fits in 64GB. Target MLP layers (`gate_proj`, `up_proj`, `down_proj`) -- research shows MLP-only LoRA matches MLP+attention while attention-only underperforms. Use rank 16-32.
+**Why Ollama env vars via `launchctl` on macOS**
 
+Ollama runs as a macOS launch agent. Environment variables set with `export` in your shell are not inherited by it. You have to use `launchctl setenv` and restart Ollama. This applies to all Ollama config: `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, model limits, etc.
 
----
+**Why full regeneration on CLAUDE.md updates**
 
-## Fine-tuning reference
+Merging or diffing against an existing CLAUDE.md would require parsing it back into structure and reconciling with the source knowledge files. Full regeneration is simpler, deterministic, and the file is explicitly marked as auto-generated -- manual edits are not preserved by design.
 
-| Method | Where | Max model size | Speed | Cost |
-|--------|-------|----------------|-------|------|
-| MLX LoRA/QLoRA | Local (M2 Ultra 64GB) | ~30B (Q4 base) | 20-60 min for 7B | $0 |
-| Unsloth + Colab | Google Colab (free T4) | ~10B | 30-60 min | $0 |
-| Unsloth + Colab Pro | Google Colab (A100) | ~70B | 1-2 hrs | ~$10/mo |
+**Why ChromaDB**
 
-Workflow: prepare JSONL to train LoRA to export GGUF to `ollama create agent-zero-custom -f Modelfile` to swap model in `.env`.
+Simplest local vector store -- Python-native, no server process, straightforward API. The memory pipeline's novelty checking compensates for its limitations around semantic discrimination. txtai (graph relationships + semantic SQL) is on the roadmap if ChromaDB proves insufficient after more real usage.
 
 
 ---
 
 ## Troubleshooting
 
-**High memory usage or swapping to disk:** Ollama defaults num_ctx to 2048-4096 (the 256K figure is the model's max capability, not Ollama's default). If you override num_ctx too high (e.g. 262144), the KV cache alone can exceed 64GB. Fix: set `num_ctx=16384` in ChatOllama constructor for adequate headroom. Also set `OLLAMA_KV_CACHE_TYPE=q8_0` and `OLLAMA_FLASH_ATTENTION=1` via launchctl. After fix: ~30GB, 100% GPU.
+**High memory usage or swapping to disk**
 
-**Ollama env vars not taking effect:** On macOS, Ollama runs as a launch agent. Regular `export` in your shell does not reach it. Use `launchctl setenv VAR_NAME "value"` then restart Ollama. This is required for `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_MAX_LOADED_MODELS`, etc.
+Ollama's default `num_ctx` is 2048--4096. The 256K figure on model cards is the model's architectural maximum, not what Ollama allocates. If you set `num_ctx=262144`, the KV cache alone can exceed available memory. Keep it at `num_ctx=16384` in `agent.py` for good headroom without waste. Also requires `OLLAMA_KV_CACHE_TYPE=q8_0` and `OLLAMA_FLASH_ATTENTION=1` via `launchctl`.
 
-**Tool calls returning JSON instead of executing:** Do NOT set `format="json"` on ChatOllama. It breaks `create_react_agent` tool execution.
+**Ollama env vars not taking effect**
 
-**`bind_tools` not implemented:** Wrong import. Use `from langchain_ollama import ChatOllama`, not `langchain-community`.
+Use `launchctl setenv VAR_NAME "value"` then `pkill -f ollama && open -a Ollama`. Regular `export` in your shell does not reach the Ollama launch agent.
 
-**stream_mode="messages" hangs:** Known issue with `create_react_agent` + `ChatOllama` in langgraph-prebuilt 1.0.8. Use `stream_mode="updates"` instead.
+**Tool calls returning raw JSON instead of executing**
 
-**Models not using GPU:** Check `ollama ps` PROCESSOR column. Should show 100% GPU. Restart Ollama after launchctl env var changes.
+Do not set `format="json"` on the `ChatOllama` instance. It breaks `create_react_agent`'s tool execution path.
 
-**OOM with 70B:** Unload the main model first: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`. Keep `OLLAMA_KV_CACHE_TYPE=q8_0`.
+**`bind_tools` raises `NotImplementedError`**
+
+Wrong import. Use `from langchain_ollama import ChatOllama`, not `from langchain_community.chat_models import ChatOllama`.
+
+**`stream_mode="messages"` hangs**
+
+Known issue with `create_react_agent` + `ChatOllama`. Use `stream_mode="updates"`.
+
+**Models not using GPU**
+
+Check `ollama ps` -- PROCESSOR column should show 100% GPU. If not, restart Ollama after setting `launchctl` env vars.
+
+**OOM loading 70B**
+
+Unload the main model first: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`
+
+**CLI and web server conflict**
+
+They cannot run concurrently -- both write to ChromaDB and SQLite. Run one at a time.
+
+**WebSocket voice audio silent**
+
+Set `ws.binaryType = 'arraybuffer'` before TTS audio arrives (already set in `app.js`). If you're extending the client, this is the first thing to check.
 
 
 ---
 
-## References
+## Stack
 
-| Resource | URL |
-|----------|-----|
-| Gemma 4 (Ollama) | https://ollama.com/library/gemma4 |
-| Gemma 4 (Google) | https://blog.google/innovation-and-ai/technology/developers-tools/gemma-4/ |
-| Gemma 4 local guide (Unsloth) | https://unsloth.ai/docs/models/gemma-4 |
-| MLX on Apple Silicon | https://yage.ai/share/mlx-apple-silicon-en-20260331.html |
-| MLX-LM fine-tuning | https://markaicode.com/run-fine-tune-llms-mac-mlx-lm/ |
-| DSPy GEPA | https://dspy.ai/api/optimizers/GEPA/overview/ |
-| GEPA GitHub | https://github.com/gepa-ai/gepa |
-| Agent Lightning | https://microsoft.github.io/agent-lightning/latest/ |
-| Agent Lightning GitHub | https://github.com/microsoft/agent-lightning |
-| Unsloth | https://unsloth.ai/ |
-| LangGraph docs | https://docs.langchain.com/oss/python/langgraph/overview |
-| ChromaDB | https://www.trychroma.com/ |
-| txtai | https://neuml.github.io/txtai/ |
-| Crawl4AI | https://docs.crawl4ai.com/ |
+| Layer | Package | License |
+|-------|---------|---------|
+| Agent framework | LangGraph | MIT |
+| LLM interface | langchain-ollama | MIT |
+| Inference | Ollama | MIT |
+| Vector memory | ChromaDB | Apache 2.0 |
+| API | FastAPI + Uvicorn | MIT / BSD |
+| STT | lightning-whisper-mlx | MIT |
+| VAD | silero-vad | MIT |
+| Wake word | openwakeword | Apache 2.0 |
+| ML runtime | MLX (Apple Silicon) | Apache 2.0 |
+| Neural nets | PyTorch | BSD |
+| DB persistence | aiosqlite | MIT |
+| Validation | Pydantic | MIT |
+| Tests | pytest | MIT |
+
+Everything here is open source with permissive licenses. No commercial dependencies.
+
+
+---
+
+## Acknowledgments
+
+Index and log patterns from Andrej Karpathy's LLM Wiki. ChromaDB organization approach from MemPalace by Milla Jovovich.
+
+
+---
+
+## License
+
+MIT. See `LICENSE`.

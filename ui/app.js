@@ -199,14 +199,9 @@ async function toggleMic() {
 }
 
 async function startMic() {
-  console.log('[mic] startMic called, connected=', connected);
-  if (!connected) {
-    console.warn('[mic] not connected, aborting');
-    return;
-  }
+  if (!connected) return;
 
   try {
-    console.log('[mic] requesting getUserMedia...');
     // AudioContext at 16kHz -- browser handles resampling
     audioCtx = new AudioContext({ sampleRate: 16000 });
 
@@ -214,11 +209,9 @@ async function startMic() {
     // can't always satisfy it and silently fail. Let the browser choose the
     // native rate; AudioContext resamples to 16kHz internally.
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    console.log('[mic] getUserMedia ok, tracks:', mediaStream.getAudioTracks().length);
 
     // Register AudioWorklet
     await audioCtx.audioWorklet.addModule('/ui/audio-worklet.js');
-    console.log('[mic] AudioWorklet loaded');
     const source = audioCtx.createMediaStreamSource(mediaStream);
     workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
 
@@ -263,7 +256,6 @@ async function startMic() {
     source.connect(workletNode);
     workletNode.connect(silentGain);
     silentGain.connect(audioCtx.destination);
-    console.log('Mic started, AudioContext sampleRate:', audioCtx.sampleRate);
 
     micOn = true;
     micBtn.className = 'mic-on';

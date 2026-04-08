@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent.config import API_TOKEN, KNOWLEDGE_CANON_PATH, MAIN_MODEL, VOICE_MODEL, UI_DIR
+from agent.config import API_TOKEN, KNOWLEDGE_CANON_PATH, MAIN_MODEL, VOICE_MODEL, UI_DIR, PROJECT_OUTPUTS_PATH
 from bridge.api_models import (
     ClaudeMdGenerateRequest,
     ClaudeMdGenerateResponse,
@@ -39,6 +39,7 @@ from knowledge.knowledge_store import (
 
 VERSION = "0.1.0"
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
+_OUTPUTS_DIR = Path(PROJECT_OUTPUTS_PATH)
 _PRIVACY_EXCLUDE = ["private", "secret"]
 _MAX_BODY_BYTES = 1_048_576  # 1 MB
 
@@ -295,16 +296,18 @@ async def write_claude_md_endpoint(
     - content only: writes the provided content directly (for iteration workflow)
     """
     target_dir = Path(req.project_path).expanduser()
+    if not target_dir.is_absolute():
+        target_dir = _OUTPUTS_DIR / target_dir
 
     if req.project_name:
-        # Auto-generate from knowledge base
-        path = write_claude_md(req.project_path, req.project_name)
-        append_log("claude-md", req.project_path, detail=f"project: {req.project_name}")
+        # Auto-generate from knowledge base. Pass resolved absolute path.
+        path = write_claude_md(str(target_dir), req.project_name)
+        append_log("claude-md", str(target_dir), detail=f"project: {req.project_name}")
         return ClaudeMdWriteResponse(message=f"Generated and wrote CLAUDE.md to {path}")
 
     # Write caller-provided content directly
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "CLAUDE.md"
     target.write_text(req.content, encoding="utf-8")
-    append_log("claude-md", req.project_path, detail="caller-provided content")
+    append_log("claude-md", str(target_dir), detail="caller-provided content")
     return ClaudeMdWriteResponse(message=f"Wrote CLAUDE.md to {target}")

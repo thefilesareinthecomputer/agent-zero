@@ -187,7 +187,11 @@ def update_project_context(project_path: str, project_name: str) -> str:
     files tagged with project:<project_name> from both editable and canon
     knowledge, assembles a structured CLAUDE.md, and writes it to
     project_path. Claude Code reads this file automatically at session start.
-    Files tagged private or secret are excluded."""
+    Files tagged private or secret are excluded.
+
+    project_path can be an absolute path or a name/relative path. Relative
+    paths resolve under project_outputs/ in the agent root -- do not pass
+    bare names like 'desktop' expecting system paths."""
     try:
         path = _write_claude_md(project_path, project_name)
         return f"Updated CLAUDE.md at {path}"

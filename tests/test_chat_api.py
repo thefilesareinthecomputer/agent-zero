@@ -1,6 +1,5 @@
 """Tests for the chat and voice API endpoints."""
 
-import asyncio
 import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -82,9 +81,8 @@ class TestChatSSE:
         )
         assert resp.status_code == 401
 
-    @patch("bridge.chat._text_agent")
-    @patch("bridge.chat._lock", new_callable=lambda: asyncio.Lock)
-    def test_chat_returns_sse_stream(self, mock_lock, mock_agent, client):
+    def test_chat_returns_sse_stream(self, client):
+        # No lock mock needed -- the real asyncio.Lock starts unlocked
         mock_agent_instance = _make_mock_agent()
         with patch("bridge.chat._text_agent", mock_agent_instance):
             resp = client.post(
@@ -112,17 +110,14 @@ class TestChatSSE:
 
 class TestWebSocketAuth:
     def test_websocket_auth_required(self, client):
-        """WebSocket without auth message should be closed."""
+        """WebSocket should reject binary frames sent instead of JSON auth."""
+        # chat.py now handles binary auth gracefully: receives the raw message,
+        # detects no 'text' key, sends auth_fail, and closes cleanly.
         with client.websocket_connect("/ws/audio") as ws:
-            # Send binary first (not JSON auth) -- should get rejected
             ws.send_bytes(b"\x00" * 1024)
-            try:
-                msg = ws.receive_text()
-                data = json.loads(msg)
-                # Server should reject or close
-                assert data.get("type") in ("auth_fail", None)
-            except Exception:
-                pass  # connection closed
+            msg = ws.receive_text()
+            data = json.loads(msg)
+            assert data["type"] == "auth_fail"
 
     def test_websocket_auth_valid(self, client):
         """Valid auth should return auth_ok."""

@@ -46,3 +46,5 @@ knowledge/*.md
 knowledge/**/*.md
 knowledge_canon/*.md
 knowledge_canon/**/*.md
+project_outputs/*.md
+project_outputs/**/*.md

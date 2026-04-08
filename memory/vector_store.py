@@ -105,12 +105,15 @@ def delete(doc_ids: list[str]) -> None:
 def delete_all() -> None:
     """Delete all documents in the collection."""
     global _collection
-    client = _get_collection()  # ensure client is initialized
+    _get_collection()  # ensure client is initialized
     if _client is not None:
         _client.delete_collection("conversations")
-        _collection = None
-        # Re-create empty collection
-        _get_collection()
+        # Re-create using the same client -- do NOT call _get_collection(),
+        # which would reinitialize _client from config when _collection is None
+        _collection = _client.get_or_create_collection(
+            name="conversations",
+            metadata={"hnsw:space": "cosine"},
+        )
 
 
 def update_metadata(doc_id: str, metadata: dict) -> None:

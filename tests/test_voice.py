@@ -121,10 +121,10 @@ class TestSentenceSplit:
 
 class TestTTSIntegration:
     @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS only")
-    @pytest.mark.asyncio
-    async def test_synthesize_produces_bytes(self):
+    def test_synthesize_produces_bytes(self):
+        import asyncio
         from voice.tts import synthesize_sentence
-        pcm = await synthesize_sentence("Hello.", voice="Samantha", rate=200)
+        pcm = asyncio.run(synthesize_sentence("Hello.", voice="Samantha", rate=200))
         assert isinstance(pcm, bytes)
         assert len(pcm) > 0
 
@@ -139,7 +139,5 @@ class TestEchoSuppression:
         # Should return None immediately (frame discarded)
         import asyncio
         frame = np.zeros(FRAME_SAMPLES, dtype=np.int16).tobytes()
-        result = asyncio.get_event_loop().run_until_complete(
-            handler.handle_audio_frame(frame)
-        )
+        result = asyncio.run(handler.handle_audio_frame(frame))
         assert result is None

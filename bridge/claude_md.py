@@ -9,21 +9,38 @@ Excludes files tagged private or secret from both sources.
 Writes a complete CLAUDE.md to the target project path. Full regeneration
 on each call -- no merge, no diffing.
 
-Size target: under 4000 tokens (~16KB). If total content exceeds the budget,
-only the most recently modified files are included, and each file's content
-is truncated to ~2KB with a note that the full file is available via the API.
+Inclusion strategy:
+1. Score all candidate files by weighted priority:
+   - Recency: exponential decay on last_modified (30-day half-life)
+   - Canon bonus: 2x multiplier (authoritative source)
+2. Sort by score descending.
+3. Greedily fill the budget (default 64KB):
+   - Include full content if it fits in remaining budget.
+   - Include truncated content if remaining budget >= FILE_MIN_CHARS and
+     truncation would still leave meaningful content.
+   - Skip the file if the remaining budget is below the floor.
+4. Append a summary of any skipped files.
+
+Relative project paths resolve to PROJECT_OUTPUTS_PATH.
 """
 
+import math
+from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.config import KNOWLEDGE_CANON_PATH
+from agent.config import KNOWLEDGE_CANON_PATH, PROJECT_OUTPUTS_PATH, CLAUDE_MD_MAX_CHARS
 from knowledge.knowledge_store import list_files, read_file
 
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
+_OUTPUTS_DIR = Path(PROJECT_OUTPUTS_PATH)
 
-# Rough estimate: 1 token ~= 4 chars. 4000 tokens ~= 16000 chars.
-MAX_CHARS = 16000
-FILE_CONTENT_CAP = 2000  # ~500 tokens per file
+# Minimum chars of content worth including after truncation.
+# A section smaller than this is more noise than signal.
+FILE_MIN_CHARS = 400
+
+# Separator overhead between sections (approximate)
+_SEPARATOR = "\n\n---\n\n"
+_SEPARATOR_LEN = len(_SEPARATOR)
 
 
 def _collect_files(project_name: str) -> list[dict]:
@@ -46,14 +63,39 @@ def _collect_files(project_name: str) -> list[dict]:
     for f in canon_files:
         f["source"] = "canon"
 
-    # Canon files first (authoritative), then knowledge files
-    return canon_files + kb_files
+    return kb_files + canon_files
 
 
-def _build_section(file_info: dict) -> str:
+def _score_file(file_info: dict) -> float:
+    """Score a file for inclusion priority. Higher score = higher priority.
+
+    Recency: exponential decay based on last_modified. Half-life of 30 days --
+    a file updated today scores 1.0; one updated 30 days ago scores 0.5;
+    90 days ago scores ~0.125. Uses last_modified, not date created.
+
+    Canon bonus: 2x multiplier. Canon files are authoritative and should
+    survive budget cuts over knowledge files of similar age.
+    """
+    last_modified = file_info.get("last_modified", "")
+    try:
+        mod_dt = datetime.fromisoformat(last_modified)
+        if mod_dt.tzinfo is None:
+            mod_dt = mod_dt.replace(tzinfo=timezone.utc)
+        days_old = (datetime.now(timezone.utc) - mod_dt).total_seconds() / 86400
+    except Exception:
+        days_old = 365  # treat unparseable dates as old
+
+    recency = math.exp(-days_old * math.log(2) / 30)
+    canon_multiplier = 2.0 if file_info.get("source") == "canon" else 1.0
+    return recency * canon_multiplier
+
+
+def _build_section(file_info: dict, content_limit: int) -> str:
     """Build a markdown section for one knowledge file.
 
-    Returns the section text or empty string if the file has no content.
+    content_limit: max chars to include from the file body. Pass sys.maxsize
+    (or a very large number) for uncapped. Returns empty string if the file
+    has no content.
     """
     filename = file_info["filename"]
     tags = file_info.get("tags", [])
@@ -65,10 +107,9 @@ def _build_section(file_info: dict) -> str:
     if not content:
         return ""
 
-    # Truncate if over the per-file cap
     truncated = False
-    if len(content) > FILE_CONTENT_CAP:
-        content = content[:FILE_CONTENT_CAP]
+    if len(content) > content_limit:
+        content = content[:content_limit]
         truncated = True
 
     stem = filename.replace(".md", "")
@@ -108,39 +149,78 @@ def generate_claude_md(project_name: str) -> str:
     if not files:
         return header + "\n(No knowledge files found for this project.)\n"
 
-    sections = []
-    total_chars = len(header)
+    # Score and sort. Higher score = higher inclusion priority.
+    for f in files:
+        f["_score"] = _score_file(f)
+    files.sort(key=lambda f: f["_score"], reverse=True)
+
+    sections: list[str] = []
+    skipped: list[str] = []
+    budget = CLAUDE_MD_MAX_CHARS - len(header) - len(_SEPARATOR)
 
     for f in files:
-        section = _build_section(f)
-        if not section:
+        filename = f["filename"]
+        source = f.get("source", "knowledge")
+        base_dir = _CANON_DIR if source == "canon" else None
+        raw_content = read_file(filename, base_dir=base_dir)
+        if not raw_content:
             continue
 
-        # Check if adding this section would exceed the budget
-        if total_chars + len(section) + 10 > MAX_CHARS:
-            sections.append(
-                "\n---\n\n(Additional knowledge files omitted to stay within "
-                "context budget. Query the local API for full access.)\n"
-            )
-            break
+        # Estimate full section size (header lines ~80 chars, separator overhead)
+        section_overhead = 80
+        full_size = len(raw_content) + section_overhead
 
-        sections.append(section)
-        total_chars += len(section) + 10  # account for separators
+        if full_size <= budget:
+            # Fits whole -- include at full length
+            section = _build_section(f, len(raw_content))
+            if section:
+                sections.append(section)
+                budget -= len(section) + _SEPARATOR_LEN
+        elif budget >= FILE_MIN_CHARS + section_overhead:
+            # Partial fit -- truncate to remaining budget minus overhead
+            limit = budget - section_overhead
+            section = _build_section(f, limit)
+            if section:
+                sections.append(section)
+                budget -= len(section) + _SEPARATOR_LEN
+        else:
+            # Budget exhausted -- record as skipped
+            skipped.append(filename)
 
-    body = "\n\n---\n\n".join(sections) if sections else "(No content.)"
-    return header + "\n---\n\n" + body + "\n"
+    body = _SEPARATOR.join(sections) if sections else "(No content.)"
+
+    result = header + "\n---\n\n" + body + "\n"
+
+    if skipped:
+        skipped_note = (
+            "\n---\n\n"
+            f"({len(skipped)} knowledge file(s) omitted -- budget exhausted. "
+            "Query the local API for full access: "
+            + ", ".join(skipped)
+            + ")"
+        )
+        result += skipped_note
+
+    return result
 
 
 def write_claude_md(project_path: str, project_name: str) -> str:
     """Generate and write CLAUDE.md to a project directory.
 
+    Relative paths resolve to PROJECT_OUTPUTS_PATH. Absolute paths are
+    used as-is.
+
     Args:
-        project_path: Absolute path to the target project directory.
+        project_path: Path to the target project directory. Relative paths
+            are resolved under project_outputs/ in the project root.
         project_name: Name used to match project:<name> tags.
 
     Returns the path of the written file.
     """
     target_dir = Path(project_path).expanduser()
+    if not target_dir.is_absolute():
+        target_dir = _OUTPUTS_DIR / target_dir
+
     target_dir.mkdir(parents=True, exist_ok=True)
 
     content = generate_claude_md(project_name)

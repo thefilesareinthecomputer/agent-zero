@@ -169,14 +169,23 @@ async def websocket_audio(websocket: WebSocket):
     """
     await websocket.accept()
 
-    # -- Auth: first message must be JSON with token --
+    # -- Auth: first message must be JSON text with token --
     try:
-        first_msg = await asyncio.wait_for(
-            websocket.receive_text(), timeout=10.0
-        )
+        raw = await asyncio.wait_for(websocket.receive(), timeout=10.0)
     except (asyncio.TimeoutError, WebSocketDisconnect):
         await websocket.close(code=1008, reason="Auth timeout")
         return
+
+    if raw.get("type") == "websocket.disconnect":
+        return
+
+    if "text" not in raw:
+        # Binary frame instead of JSON auth -- reject cleanly
+        await _ws_send(websocket, "auth_fail", {})
+        await websocket.close(code=1008, reason="Expected JSON auth message")
+        return
+
+    first_msg = raw["text"]
 
     try:
         auth_data = json.loads(first_msg)

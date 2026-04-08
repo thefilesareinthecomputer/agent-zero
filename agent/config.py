@@ -45,3 +45,7 @@ MAX_SPEECH_SECONDS: int = int(os.getenv("MAX_SPEECH_SECONDS", "30"))
 
 # UI
 UI_DIR: str = str(_project_root / "ui")
+
+# Bridge outputs
+PROJECT_OUTPUTS_PATH: str = str(_project_root / os.getenv("PROJECT_OUTPUTS_PATH", "project_outputs"))
+CLAUDE_MD_MAX_CHARS: int = int(os.getenv("CLAUDE_MD_MAX_CHARS", str(64 * 1024)))  # 64KB default
