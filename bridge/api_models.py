@@ -33,8 +33,10 @@ class FileContent(BaseModel):
 class SearchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     filename: str
-    matching_lines: list[str]
     source: str
+    heading: str = ""
+    summary: str = ""
+    matching_lines: list[str] = []
 
 
 class SaveResponse(BaseModel):

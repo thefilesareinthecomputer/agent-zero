@@ -406,16 +406,8 @@ def _extract_summary(body: str, max_len: int = 80) -> str:
     return ""
 
 
-def rebuild_index(*, base_dir: Path | None = None) -> str:
-    """Rebuild the index.md catalog in the knowledge directory.
-
-    Lists every .md file (excluding index.md and log.md) with tags, a
-    mechanical summary, and last-modified date. Returns the path of the
-    written index file.
-    """
-    base = base_dir or KNOWLEDGE_DIR
-    base.mkdir(parents=True, exist_ok=True)
-
+def _scan_files(base: Path) -> list[dict]:
+    """Scan a directory for .md files and extract index metadata."""
     files = []
     for path in _iter_md_files(base):
         rel = _relative_name(path, base)
@@ -442,14 +434,58 @@ def rebuild_index(*, base_dir: Path | None = None) -> str:
         })
 
     files.sort(key=lambda r: r["modified"], reverse=True)
+    return files
+
+
+def rebuild_index(*, base_dir: Path | None = None,
+                  canon_dir: Path | None = None) -> str:
+    """Rebuild the index.md catalog in the knowledge directory.
+
+    Two sections: canon files (read-only reference) on top, then
+    agent-editable files below. Canon directory is auto-detected from
+    config if not provided.
+
+    Returns the path of the written index file.
+    """
+    base = base_dir or KNOWLEDGE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+
+    # Resolve canon directory
+    if canon_dir is None:
+        from agent.config import KNOWLEDGE_CANON_PATH
+        canon_dir = Path(KNOWLEDGE_CANON_PATH)
 
     lines = ["# Knowledge Index", ""]
-    lines.append("| File | Tags | Summary | Modified |")
-    lines.append("|------|------|---------|----------|")
-    for f in files:
-        lines.append(
-            f"| {f['filename']} | {f['tags']} | {f['summary']} | {f['modified']} |"
-        )
+
+    # Canon files (read-only reference)
+    if canon_dir.exists():
+        canon_files = _scan_files(canon_dir)
+        if canon_files:
+            lines.append("## Canon (read-only reference)")
+            lines.append("")
+            lines.append("| File | Tags | Summary | Modified |")
+            lines.append("|------|------|---------|----------|")
+            for f in canon_files:
+                lines.append(
+                    f"| {f['filename']} | {f['tags']} "
+                    f"| {f['summary']} | {f['modified']} |"
+                )
+            lines.append("")
+
+    # Agent-editable files
+    kb_files = _scan_files(base)
+    lines.append("## Knowledge (editable)")
+    lines.append("")
+    if kb_files:
+        lines.append("| File | Tags | Summary | Modified |")
+        lines.append("|------|------|---------|----------|")
+        for f in kb_files:
+            lines.append(
+                f"| {f['filename']} | {f['tags']} "
+                f"| {f['summary']} | {f['modified']} |"
+            )
+    else:
+        lines.append("(no files yet)")
     lines.append("")
 
     index_path = base / "index.md"

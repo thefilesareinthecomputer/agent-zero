@@ -191,9 +191,27 @@ async def search_knowledge(
     q: str = Query(..., min_length=1, description="Search query"),
     _: str = Depends(verify_token),
 ):
-    """Search knowledge files for a keyword or phrase (merged, privacy-filtered)."""
+    """Search knowledge files by topic (semantic, privacy-filtered)."""
+    from knowledge.kb_index import search_kb
+
     private = _private_filenames()
 
+    # Semantic search via KB vector index
+    hits = search_kb(q, top_k=10)
+
+    if hits:
+        results = []
+        for h in hits:
+            if h["filename"] not in private:
+                results.append(SearchResult(
+                    filename=h["filename"],
+                    source=h["source"],
+                    heading=h.get("heading", ""),
+                    summary=h.get("summary", ""),
+                ))
+        return results
+
+    # Fallback to substring search if KB index is empty
     kb_results = search_files(q)
     canon_results = search_files(q, base_dir=_CANON_DIR)
 
@@ -268,6 +286,14 @@ async def save_knowledge(
 
     path = save_file(req.filename, req.content, req.tags, project=req.project)
     # save_file already calls rebuild_index and append_log internally
+
+    # Re-index in the KB vector store
+    try:
+        from knowledge.kb_index import index_file as kb_index_file
+        kb_index_file(Path(path).name, source="knowledge")
+    except Exception:
+        pass  # Index failure should not block save
+
     sanitized = Path(path).name
     return SaveResponse(filename=sanitized, message="Saved")
 

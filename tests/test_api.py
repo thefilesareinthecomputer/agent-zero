@@ -6,6 +6,7 @@ never touch real data.
 
 import os
 import textwrap
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -182,13 +183,16 @@ class TestRead:
 # -- Search --
 
 class TestSearch:
-    def test_search(self, client, kb_dirs):
+    @patch("knowledge.kb_index.search_kb", return_value=[])
+    def test_search(self, mock_kb, client, kb_dirs):
+        """Substring fallback when KB index is empty."""
         resp = client.get("/knowledge/search", params={"q": "test"}, headers=AUTH)
         assert resp.status_code == 200
         filenames = [r["filename"] for r in resp.json()]
         assert "test-file.md" in filenames
 
-    def test_search_excludes_private(self, client, kb_dirs):
+    @patch("knowledge.kb_index.search_kb", return_value=[])
+    def test_search_excludes_private(self, mock_kb, client, kb_dirs):
         resp = client.get("/knowledge/search", params={"q": "private"}, headers=AUTH)
         filenames = [r["filename"] for r in resp.json()]
         assert "secret-plans.md" not in filenames

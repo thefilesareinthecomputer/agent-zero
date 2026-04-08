@@ -27,8 +27,12 @@ KNOWLEDGE_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_PATH", "knowledge
 KNOWLEDGE_CANON_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_CANON_PATH", "knowledge_canon"))
 
 # Agent inference
-NUM_CTX: int = int(os.getenv("NUM_CTX", "16384"))
+NUM_CTX: int = int(os.getenv("NUM_CTX", "65536"))
 NUM_PREDICT: int = int(os.getenv("NUM_PREDICT", "2048"))
+
+# Knowledge base context limits
+KB_FILE_MAX_RATIO: float = float(os.getenv("KB_FILE_MAX_RATIO", "0.4"))
+KB_FILE_MAX_TOKENS: int = int(os.getenv("KB_FILE_MAX_TOKENS", str(int(NUM_CTX * KB_FILE_MAX_RATIO))))
 FAST_TEXT_MODEL: str = os.getenv("FAST_TEXT_MODEL", "gemma4:e4b")
 
 # API

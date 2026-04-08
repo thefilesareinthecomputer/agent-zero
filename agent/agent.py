@@ -13,9 +13,10 @@ from agent.config import (
 )
 from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
-    list_knowledge, read_knowledge, search_knowledge, save_knowledge,
-    update_project_context,
+    list_knowledge, read_knowledge, read_knowledge_section,
+    search_knowledge, save_knowledge, update_project_context,
 )
+from knowledge.kb_index import search_kb as _search_kb, sync_kb_index
 from memory.memory_manager import get_relevant_context, memory_count
 
 
@@ -24,14 +25,15 @@ SYSTEM_PROMPT = (
     "You have two memory systems:\n"
     "- Conversation memory: automatic. Past exchanges are retrieved and shown "
     "to you when relevant. You do not need to manage this.\n"
-    "- Knowledge base: a folder of markdown files you manage. Use it to store "
-    "persistent reference information -- user preferences, project notes, "
-    "research, decisions, how-tos. The knowledge base maintains an index.md "
-    "file -- read it first to see what files exist and what they cover. "
-    "Before creating a new file, check the index or search to see if the "
-    "topic is already covered. To edit an existing file, read it first, then "
-    "save the full updated content. Prefer updating existing files over "
-    "creating new ones for the same topic.\n\n"
+    "- Knowledge base: a folder of markdown files you manage. Use "
+    "search_knowledge to find relevant files by topic (returns summaries, "
+    "not full content). Use read_knowledge to load the full content when "
+    "you need to work with a file. For large files, read_knowledge will "
+    "list available sections -- use read_knowledge_section to load a "
+    "specific section. Before creating a new file, search to see if the "
+    "topic is already covered. To edit an existing file, read it first, "
+    "then save the full updated content. Prefer updating existing files "
+    "over creating new ones for the same topic.\n\n"
     "When you produce a valuable synthesis in conversation -- a comparison, "
     "analysis, how-to, or research summary -- consider saving it as a "
     "knowledge file so it is available in future sessions rather than lost "
@@ -54,8 +56,8 @@ SYSTEM_PROMPT = (
 
 TOOLS = [
     get_current_time, run_shell_command, read_file, write_file,
-    list_knowledge, read_knowledge, search_knowledge, save_knowledge,
-    update_project_context,
+    list_knowledge, read_knowledge, read_knowledge_section,
+    search_knowledge, save_knowledge, update_project_context,
 ]
 
 
@@ -83,6 +85,20 @@ def _build_prompt(state: dict) -> list:
                     + "\n---\n".join(memories)
                 )
 
+        # Inject relevant KB summaries for topic awareness
+        try:
+            kb_hits = _search_kb(query, top_k=3)
+            if kb_hits:
+                system_content += (
+                    "\n\nRelevant knowledge base files:\n"
+                    + "\n".join(
+                        f"- {h['filename']}: {h['heading']} -- {h['summary']}"
+                        for h in kb_hits
+                    )
+                )
+        except Exception:
+            pass  # KB index not available -- skip injection
+
     return [SystemMessage(content=system_content)] + list(messages)
 
 
@@ -99,6 +115,12 @@ def create_agent(
     db_path = db_path or AGENT_DB_PATH
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Sync KB vector index with files on disk
+    try:
+        sync_kb_index()
+    except Exception:
+        pass  # KB index failure should not block agent startup
 
     llm = ChatOllama(
         model=model,
@@ -139,6 +161,13 @@ async def create_async_agent(
     db_path = db_path or AGENT_DB_PATH
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Sync KB vector index with files on disk
+    import asyncio
+    try:
+        await asyncio.to_thread(sync_kb_index)
+    except Exception:
+        pass  # KB index failure should not block agent startup
 
     llm = ChatOllama(
         model=model,
