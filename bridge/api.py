@@ -1,19 +1,20 @@
-"""Agent Zero HTTP API -- privacy-preserving access to the knowledge base.
+"""Agent Zero HTTP API -- knowledge base, chat, and voice.
 
-FastAPI server on localhost (127.0.0.1). Bearer token auth. Exposes
-knowledge base CRUD and CLAUDE.md generation. Filesystem only -- no
-vector store, no agent execution, no sessions.
-
-Inspirations: Karpathy's LLM Wiki (index/log patterns), MemPalace (MCP).
+FastAPI server on localhost (127.0.0.1). Bearer token auth. Serves
+knowledge base CRUD, CLAUDE.md generation, text chat (SSE), voice
+chat (WebSocket), and the web UI as static files.
 """
 
+import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
-from agent.config import API_TOKEN, KNOWLEDGE_CANON_PATH
+from agent.config import API_TOKEN, KNOWLEDGE_CANON_PATH, MAIN_MODEL, VOICE_MODEL, UI_DIR
 from bridge.api_models import (
     ClaudeMdGenerateRequest,
     ClaudeMdGenerateResponse,
@@ -44,12 +45,38 @@ _MAX_BODY_BYTES = 1_048_576  # 1 MB
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup/shutdown lifecycle. Validates config on startup."""
+    """Startup/shutdown lifecycle. Validates config, inits agents and voice."""
     if not API_TOKEN:
         raise RuntimeError("API_TOKEN not set in .env -- refusing to start")
     if len(API_TOKEN) < 32:
         raise RuntimeError("API_TOKEN must be at least 32 characters")
+
+    # Init agents (text + voice) with async checkpointer
+    from agent.agent import create_async_agent
+    from bridge.chat import init_agents, set_voice_ready
+
+    text_agent, checkpointer = await create_async_agent(model=MAIN_MODEL)
+    voice_agent, _ = await create_async_agent(model=VOICE_MODEL)
+    init_agents(text_agent, voice_agent, checkpointer)
+
+    # Preload and warm Whisper-MLX (in thread -- GPU-bound)
+    try:
+        from voice.stt import load_whisper, warm_up
+        await asyncio.to_thread(load_whisper)
+        await asyncio.to_thread(warm_up)
+        set_voice_ready(True)
+    except Exception as e:
+        print(f"Warning: voice subsystem failed to load: {e}")
+        set_voice_ready(False)
+
+    from agent.config import API_PORT
+    print(f"Agent Zero ready -- UI at http://127.0.0.1:{API_PORT}/")
+
     yield
+
+    # Shutdown: close async checkpointer
+    if checkpointer and hasattr(checkpointer, "conn"):
+        await checkpointer.conn.close()
 
 
 app = FastAPI(
@@ -57,6 +84,15 @@ app = FastAPI(
     version=VERSION,
     lifespan=lifespan,
 )
+
+# Mount web UI static files
+_ui_dir = Path(UI_DIR)
+if _ui_dir.exists():
+    app.mount("/ui", StaticFiles(directory=str(_ui_dir), html=True), name="ui")
+
+# Include chat/voice router
+from bridge.chat import router as chat_router  # noqa: E402
+app.include_router(chat_router)
 
 
 # -- Auth --
@@ -116,10 +152,21 @@ def _is_path_traversal(filename: str) -> bool:
 
 # -- Routes --
 
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    """Redirect root to web UI."""
+    return RedirectResponse(url="/ui/index.html")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Server status check. No auth required."""
-    return HealthResponse(status="ok", version=VERSION)
+    from bridge.chat import is_voice_ready
+    return HealthResponse(
+        status="ok",
+        version=VERSION,
+        voice="ready" if is_voice_ready() else "unavailable",
+    )
 
 
 @app.get("/knowledge", response_model=list[FileInfo])

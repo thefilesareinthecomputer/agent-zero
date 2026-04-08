@@ -18,6 +18,10 @@ data/
 *.db-shm
 *.db-wal
 
+# ML model caches (downloaded on first run, hardware-specific)
+mlx_models/
+.cache/huggingface/
+
 # Claude Code — local state and project context
 claude/
 CLAUDE.md

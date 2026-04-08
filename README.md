@@ -95,8 +95,10 @@ Autonomous, self-improving AI agent running on a Mac Studio M2 Ultra (64GB). Bui
 | Agent optimization | Microsoft Agent Lightning | planned | Framework-agnostic. Prompt optimization + optional RL. Works with LangGraph. |
 | Local fine-tuning | MLX + mlx-lm | planned | Native Apple Silicon LoRA/QLoRA. Up to ~30B on 64GB. |
 | Cloud fine-tuning | Unsloth + Google Colab | planned | Free T4 GPU for bigger experiments. Export GGUF to Ollama. |
-| Voice STT | Whisper-MLX (lightning-whisper-mlx) | planned | Runs on Metal. |
-| Voice TTS | macOS `say` | planned | Zero deps. |
+| Voice STT | Whisper-MLX (lightning-whisper-mlx) | done | Runs on Metal. distil-large-v3 default. Warm-up on startup. |
+| Voice TTS | macOS `say` | done | Sentence-chunked streaming. 16kHz PCM over WebSocket. |
+| Voice VAD | Silero-VAD | done | ONNX, 512-sample frames at 16kHz. |
+| Web UI | Vanilla HTML/CSS/JS | done | Dark theme SPA served by FastAPI. SSE text chat, WebSocket voice. |
 | Web browsing | Crawl4AI | planned | Local-first, async, LLM-friendly extraction. |
 
 
@@ -131,10 +133,19 @@ agent-zero/
 │   ├── vector_store.py           # ChromaDB wrapper -- store, search, tag-filtered queries
 │   ├── tagger.py                 # LLM-based category/subcategory tagging + novelty checker (e2b)
 │   └── memory_manager.py         # Unified interface -- dedup, contradiction, novelty, pruning
-├── voice/                        # Phase 6
+├── voice/
 │   ├── __init__.py
-│   ├── stt.py                    # Whisper-MLX speech-to-text
-│   └── tts.py                    # macOS say text-to-speech
+│   ├── vad.py                    # Silero-VAD state machine (IDLE/SPEAKING/COMPLETE)
+│   ├── stt.py                    # Whisper-MLX STT -- preload, warm-up, wake word extraction
+│   ├── tts.py                    # macOS say TTS -- sentence-chunked streaming PCM
+│   └── pipeline.py               # Full voice pipeline -- VAD -> STT -> wake word -> query
+├── ui/
+│   ├── index.html                # Single-page dark theme UI
+│   ├── style.css                 # Minimalist dark CSS
+│   ├── app.js                    # Auth, SSE chat, WebSocket voice, audio playback
+│   ├── audio-worklet.js          # AudioWorklet: float32 -> PCM16, 512-sample buffering
+│   └── sounds/
+│       └── ready.wav             # Wake word confirmation tone
 ├── optimization/                 # Phase 4
 │   ├── __init__.py
 │   ├── dspy_optimizer.py         # GEPA prompt evolution
@@ -150,7 +161,9 @@ agent-zero/
 │   ├── az-api                    # API server launcher (symlink to /usr/local/bin/az-api)
 │   └── setup_ollama.sh           # Ollama env vars + model pulls for M2 Ultra
 ├── tests/
-│   └── test_api.py               # pytest suite -- auth, privacy, canon, traversal, CLAUDE.md
+│   ├── test_api.py               # pytest suite -- auth, privacy, canon, traversal, CLAUDE.md
+│   ├── test_voice.py             # voice unit tests -- VAD, wake word, TTS, echo suppression
+│   └── test_chat_api.py          # chat API tests -- SSE auth, WebSocket auth, static serving
 └── claude/                       # Build state tracking, gitignored
     └── state.md
 ```
@@ -183,10 +196,17 @@ API_TOKEN=<generated-via-secrets.token_urlsafe(32)>
 API_PORT=8900
 
 # Voice
+VOICE_MODEL=gemma4:e4b
 VOICE_LANGUAGE=en
 VOICE_MIN_RMS=0.01
 VOICE_CHUNK_SECONDS=3
 VOICE_INPUT_GAIN=1.0
+WHISPER_MODEL=distil-large-v3
+TTS_VOICE=Samantha
+TTS_RATE=175
+VAD_THRESHOLD=0.5
+VAD_SILENCE_MS=1000
+MAX_SPEECH_SECONDS=30
 ```
 ```
 
@@ -246,6 +266,25 @@ What got built:
 - `update_project_context` tool -- agent writes CLAUDE.md to any project directory
 - Full regeneration on each call -- no merge, no diffing
 - Only project-tagged files are included (no global/untagged files leak in)
+
+### Phase 6: Voice + Web UI -- DONE
+
+Browser-based chat interface with text and voice, served from the same FastAPI process. Completed April 7, 2026.
+
+What got built:
+- `voice/vad.py` -- Silero-VAD state machine. 512-sample frames at 16kHz. IDLE/SPEAKING/TRAILING_SILENCE/COMPLETE states. Max 30s speech cap.
+- `voice/stt.py` -- Whisper-MLX wrapper (distil-large-v3). Preloaded and warmed on startup. `extract_after_wake_word()` strips "hey zero" prefix from transcript.
+- `voice/tts.py` -- macOS `say` wrapper. Sentence-chunked streaming: each sentence synthesized and sent independently for ~200ms first-audio latency.
+- `voice/pipeline.py` -- Integration layer. Handles echo cancellation (discards mic frames while TTS plays), backpressure (discards frames during agent processing).
+- `bridge/chat.py` -- FastAPI router with POST /chat (SSE streaming) and WS /ws/audio (voice pipeline). gemma4:26b for text, gemma4:e4b for voice. Shared asyncio.Lock. Stores exchanges to memory after completion.
+- `bridge/api.py` -- Extended lifespan: inits both agents (async), preloads Whisper. Mounts /ui static files. Health endpoint reports voice readiness.
+- `ui/` -- Vanilla HTML/CSS/JS SPA. Dark theme. Token in localStorage. SSE streams text tokens. WebSocket streams PCM audio frames. AudioWorklet buffers 512 samples. TTS audio plays via Web Audio API.
+
+Key implementation notes:
+- `AsyncSqliteSaver` (not `SqliteSaver`) enables native `agent.astream()` in async handlers -- no thread bridge needed
+- `ws.binaryType = 'arraybuffer'` required or TTS binary frames arrive as Blob and audio is silent
+- `AudioContext({ sampleRate: 16000 })` -- browser resamples from hardware rate internally
+- openWakeWord has no built-in "hey zero" model; wake word detection is Whisper + `extract_after_wake_word()`
 
 ### Phase 3b: HTTP API -- DONE
 

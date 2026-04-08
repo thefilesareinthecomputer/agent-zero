@@ -143,3 +143,43 @@ def create_agent(
     )
 
     return agent, checkpointer
+
+
+async def create_async_agent(
+    model: str | None = None,
+    db_path: str | None = None,
+) -> tuple:
+    """Create the LangGraph ReAct agent with async SQLite checkpointing.
+
+    For use in the FastAPI web server. Uses AsyncSqliteSaver so
+    agent.astream() works natively in async handlers.
+
+    Returns (agent, checkpointer). Caller should await checkpointer.conn.close()
+    when done.
+    """
+    import aiosqlite
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    model = model or MAIN_MODEL
+    db_path = db_path or AGENT_DB_PATH
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+    llm = ChatOllama(
+        model=model,
+        base_url=OLLAMA_BASE_URL,
+        num_ctx=16384,
+        num_predict=2048,
+    )
+
+    conn = await aiosqlite.connect(db_path)
+    checkpointer = AsyncSqliteSaver(conn)
+
+    agent = create_react_agent(
+        model=llm,
+        tools=TOOLS,
+        prompt=_build_prompt,
+        checkpointer=checkpointer,
+    )
+
+    return agent, checkpointer

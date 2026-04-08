@@ -31,7 +31,17 @@ API_TOKEN: str = os.getenv("API_TOKEN", "")
 API_PORT: int = int(os.getenv("API_PORT", "8900"))
 
 # Voice
+VOICE_MODEL: str = os.getenv("VOICE_MODEL", "gemma4:e4b")
 VOICE_LANGUAGE: str = os.getenv("VOICE_LANGUAGE", "en")
 VOICE_MIN_RMS: float = float(os.getenv("VOICE_MIN_RMS", "0.01"))
 VOICE_CHUNK_SECONDS: int = int(os.getenv("VOICE_CHUNK_SECONDS", "3"))
 VOICE_INPUT_GAIN: float = float(os.getenv("VOICE_INPUT_GAIN", "1.0"))
+WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "distil-large-v3")
+TTS_VOICE: str = os.getenv("TTS_VOICE", "Samantha")
+TTS_RATE: int = int(os.getenv("TTS_RATE", "175"))
+VAD_THRESHOLD: float = float(os.getenv("VAD_THRESHOLD", "0.5"))
+VAD_SILENCE_MS: int = int(os.getenv("VAD_SILENCE_MS", "1000"))
+MAX_SPEECH_SECONDS: int = int(os.getenv("MAX_SPEECH_SECONDS", "30"))
+
+# UI
+UI_DIR: str = str(_project_root / "ui")

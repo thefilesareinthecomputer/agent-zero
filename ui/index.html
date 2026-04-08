@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Zero</title>
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <h1>Agent Zero</h1>
+      <div id="auth-section">
+        <input type="password" id="token-input" placeholder="Bearer token" autocomplete="off">
+        <button id="connect-btn">Connect</button>
+        <button id="disconnect-btn" class="hidden">Disconnect</button>
+        <span id="status-dot" class="dot dot-disconnected" title="Disconnected"></span>
+      </div>
+    </header>
+
+    <main id="chat-container">
+      <div id="messages"></div>
+    </main>
+
+    <footer id="input-bar" class="hidden">
+      <button id="mic-btn" title="Toggle microphone" class="mic-off">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+      </button>
+      <input type="text" id="text-input" placeholder="Message Agent Zero..." autocomplete="off">
+      <button id="send-btn" title="Send">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </footer>
+  </div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

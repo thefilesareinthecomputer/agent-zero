@@ -9,6 +9,7 @@ class HealthResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: str
     version: str
+    voice: str | None = None
 
 
 class FileInfo(BaseModel):
@@ -58,6 +59,12 @@ class SaveRequest(BaseModel):
     filename: str
     content: str
     tags: list[str]
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str
+    session_id: str | None = None
 
 
 class ClaudeMdGenerateRequest(BaseModel):
