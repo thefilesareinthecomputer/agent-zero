@@ -15,6 +15,8 @@ REASONING_MODEL: str = os.getenv("REASONING_MODEL", "llama3.3:70b")
 CODE_MODEL: str = os.getenv("CODE_MODEL", "qwen3-coder:30b")
 VISION_MODEL: str = os.getenv("VISION_MODEL", "qwen3-vl:30b")
 FINETUNE_MODEL: str = os.getenv("FINETUNE_MODEL", "gemma4:e4b")
+EMBED_MODEL: str = os.getenv("EMBED_MODEL", "nomic-embed-text")
+EMBED_MAX_TOKENS: int = int(os.getenv("EMBED_MAX_TOKENS", "1800"))
 
 # Ollama
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")

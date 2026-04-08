@@ -18,10 +18,12 @@ from pathlib import Path
 import chromadb
 
 from agent.config import (
-    CHROMA_DB_PATH, FAST_MODEL, KNOWLEDGE_CANON_PATH, KNOWLEDGE_PATH,
-    OLLAMA_BASE_URL,
+    CHROMA_DB_PATH, EMBED_MAX_TOKENS, FAST_MODEL, KNOWLEDGE_CANON_PATH,
+    KNOWLEDGE_PATH, OLLAMA_BASE_URL,
 )
 from knowledge.chunker import chunk_file
+from knowledge.knowledge_store import _parse_frontmatter
+from memory.embeddings import OllamaEmbedding
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ def _get_kb_collection() -> chromadb.Collection:
         _collection = _client.get_or_create_collection(
             name="knowledge",
             metadata={"hnsw:space": "cosine"},
+            embedding_function=OllamaEmbedding(),
         )
     return _collection
 
@@ -124,7 +127,16 @@ def index_file(
         return 0
 
     mtime = path.stat().st_mtime
-    chunks = chunk_file(text, filename)
+
+    # Extract frontmatter metadata before chunking
+    frontmatter, _ = _parse_frontmatter(text)
+    tags = frontmatter.get("tags", [])
+    file_tags = ", ".join(str(t) for t in tags) if tags else ""
+    file_project = str(frontmatter.get("project", "")) if frontmatter.get("project") else ""
+    date_created = str(frontmatter.get("date-created", ""))
+    last_modified = str(frontmatter.get("last-modified", ""))
+
+    chunks = chunk_file(text, filename, max_tokens=EMBED_MAX_TOKENS)
 
     if not chunks:
         return 0
@@ -136,6 +148,22 @@ def index_file(
     ids = []
     documents = []
     metadatas = []
+
+    # Compute file-level stats once for all chunks
+    file_tokens = sum(c["token_count"] for c in chunks)
+    section_count = len(chunks)
+
+    # Build compact outline: unique top-level section names only.
+    # Strip nested paths (e.g. "Parent > Child > Leaf" -> "Parent").
+    # Dedup and cap at 500 chars to avoid bloating the system prompt.
+    seen = []
+    for c in chunks:
+        top = c["heading"].split(" > ")[0].strip()
+        if top not in seen and top != "(preamble)":
+            seen.append(top)
+    file_outline = " | ".join(seen)
+    if len(file_outline) > 500:
+        file_outline = file_outline[:497] + "..."
 
     for chunk in chunks:
         summary = _generate_summary(chunk["content"], chunk["heading"])
@@ -150,6 +178,13 @@ def index_file(
             "summary": summary,
             "token_count": chunk["token_count"],
             "mtime": mtime,
+            "file_tokens": file_tokens,
+            "section_count": section_count,
+            "file_outline": file_outline,
+            "tags": file_tags,
+            "project": file_project,
+            "date_created": date_created,
+            "last_modified": last_modified,
         })
 
     collection.add(ids=ids, documents=documents, metadatas=metadatas)
@@ -174,11 +209,41 @@ def remove_file(filename: str, source: str) -> int:
     return len(doc_ids)
 
 
-def search_kb(query: str, top_k: int = 10) -> list[dict]:
-    """Semantic search across all KB chunks.
+def get_summaries(filename: str, source: str) -> dict[str, str]:
+    """Fetch heading -> summary mapping for a file from the index.
 
-    Returns list of dicts with discovery-level info (no full content):
-        filename, source, heading, summary, chunk_index, distance
+    Returns a dict mapping heading names (case-preserved) to their
+    LLM-generated summaries. Used to enrich heading trees with context.
+    Returns empty dict if file is not indexed.
+    """
+    collection = _get_kb_collection()
+    total = collection.count()
+    if total == 0:
+        return {}
+
+    try:
+        results = collection.get(
+            where={"$and": [{"filename": filename}, {"source": source}]},
+            include=["metadatas"],
+        )
+    except Exception:
+        return {}
+
+    summaries: dict[str, str] = {}
+    for meta in results["metadatas"]:
+        heading = meta.get("heading", "")
+        summary = meta.get("summary", "")
+        if heading and summary:
+            summaries[heading] = summary
+    return summaries
+
+
+def search_kb(query: str, top_k: int = 10) -> list[dict]:
+    """Semantic search across all KB chunks, grouped by file.
+
+    Returns list of dicts, one per file, ordered by best hit distance:
+        filename, source, file_tokens, section_count, file_outline,
+        hits: [{heading, summary, chunk_index, distance}]
     """
     collection = _get_kb_collection()
     total = collection.count()
@@ -190,18 +255,31 @@ def search_kb(query: str, top_k: int = 10) -> list[dict]:
         n_results=min(top_k, total),
     )
 
-    hits = []
+    # Group raw hits by filename
+    by_file: dict[str, dict] = {}
     for i in range(len(results["ids"][0])):
         meta = results["metadatas"][0][i]
-        hits.append({
-            "filename": meta["filename"],
-            "source": meta["source"],
+        fn = meta["filename"]
+        if fn not in by_file:
+            by_file[fn] = {
+                "filename": fn,
+                "source": meta["source"],
+                "file_tokens": meta.get("file_tokens", 0),
+                "section_count": meta.get("section_count", 0),
+                "file_outline": meta.get("file_outline", ""),
+                "hits": [],
+            }
+        by_file[fn]["hits"].append({
             "heading": meta["heading"],
             "summary": meta.get("summary", ""),
             "chunk_index": meta["chunk_index"],
             "distance": results["distances"][0][i],
         })
-    return hits
+
+    # Sort files by their best (lowest distance) hit
+    grouped = list(by_file.values())
+    grouped.sort(key=lambda f: min(h["distance"] for h in f["hits"]))
+    return grouped
 
 
 def sync_kb_index() -> dict[str, int]:

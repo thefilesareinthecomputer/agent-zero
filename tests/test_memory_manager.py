@@ -347,20 +347,20 @@ class TestForgetAll:
 # -- prune --
 
 class TestPrune:
-    def test_removes_expired_memories(self):
-        """Documents older than MAX_AGE_HOURS should be pruned."""
-        expired_ts = time.time() - (mm.MAX_AGE_HOURS + 1) * 3600
-        vs.store("User: old thing\nAgent: ok.", {
-            "category": "general", "subcategory": "x", "timestamp": expired_ts
+    def test_old_memories_never_pruned_by_age(self):
+        """Age-based pruning is gone. Old memories persist indefinitely."""
+        very_old_ts = time.time() - 365 * 24 * 3600  # 1 year old
+        vs.store("User: ground truth\nAgent: ok.", {
+            "category": "personal", "subcategory": "identity", "timestamp": very_old_ts
         })
         vs.store("User: recent thing\nAgent: ok.", {
             "category": "general", "subcategory": "x", "timestamp": time.time()
         })
         pruned = mm.prune()
-        assert pruned == 1
-        assert vs.count() == 1
+        assert pruned == 0
+        assert vs.count() == 2
 
-    def test_keeps_recent_memories(self):
+    def test_keeps_all_under_cap(self):
         for i in range(3):
             vs.store(f"User: recent {i}\nAgent: ok.", {
                 "category": "general", "subcategory": "x",
@@ -375,7 +375,6 @@ class TestPrune:
 
     def test_enforces_max_memories_cap(self):
         """When count exceeds MAX_MEMORIES, oldest entries are pruned."""
-        # Patch the cap to a small number for test speed
         original_max = mm.MAX_MEMORIES
         mm.MAX_MEMORIES = 3
         try:
@@ -387,6 +386,32 @@ class TestPrune:
             pruned = mm.prune()
             assert pruned == 2
             assert vs.count() == 3
+        finally:
+            mm.MAX_MEMORIES = original_max
+
+    def test_cap_keeps_newest(self):
+        """After capacity prune, the newest entries survive."""
+        original_max = mm.MAX_MEMORIES
+        mm.MAX_MEMORIES = 2
+        try:
+            vs.store("User: oldest\nAgent: ok.", {
+                "category": "general", "subcategory": "x",
+                "timestamp": time.time() - 300,
+            })
+            vs.store("User: middle\nAgent: ok.", {
+                "category": "general", "subcategory": "x",
+                "timestamp": time.time() - 100,
+            })
+            vs.store("User: newest\nAgent: ok.", {
+                "category": "general", "subcategory": "x",
+                "timestamp": time.time(),
+            })
+            mm.prune()
+            docs = vs.get_all()
+            texts = [d["text"] for d in docs]
+            assert "User: newest\nAgent: ok." in texts
+            assert "User: middle\nAgent: ok." in texts
+            assert "User: oldest\nAgent: ok." not in texts
         finally:
             mm.MAX_MEMORIES = original_max
 

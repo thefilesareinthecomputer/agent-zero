@@ -78,11 +78,28 @@ from knowledge.knowledge_store import (
 from knowledge.chunker import (
     build_heading_tree as _build_heading_tree,
     chunk_file as _chunk_file,
+    enrich_tree_summaries as _enrich_tree_summaries,
     format_heading_tree as _format_heading_tree,
 )
-from knowledge.tokenizer import count_tokens as _count_tokens, truncate_to_tokens as _truncate
-from knowledge.kb_index import search_kb as _search_kb, index_file as _index_file
+from knowledge.tokenizer import (
+    count_tokens as _count_tokens,
+    estimate_gemma_tokens as _estimate_gemma_tokens,
+    truncate_to_tokens as _truncate,
+)
+from knowledge.kb_index import (
+    get_summaries as _get_summaries,
+    index_file as _index_file,
+    search_kb as _search_kb,
+)
 from bridge.claude_md import write_claude_md as _write_claude_md
+from memory.entity_registry import (
+    add_alias as _add_alias,
+    list_entities as _list_entities,
+    register_entity as _register_entity,
+    resolve_entity as _resolve_entity,
+    search_entities as _search_entities,
+    update_summary as _update_summary,
+)
 
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
 
@@ -131,10 +148,10 @@ def list_knowledge() -> str:
 @tool
 def read_knowledge(filename: str) -> str:
     """Returns the heading tree for a knowledge file -- H1-H5 structure
-    with token counts per subtree. Never loads full content. Use
-    read_knowledge_section to load the specific sections you need.
-    This lets you shop for content and control exactly how many tokens
-    you consume."""
+    with token counts per subtree and section summaries. Never loads
+    full content. Use read_knowledge_section to load the specific
+    sections you need. This lets you shop for content and control
+    exactly how many tokens you consume."""
     # Try knowledge/ first, then canon/
     content = _kb_read(filename)
     source = "knowledge"
@@ -146,7 +163,7 @@ def read_knowledge(filename: str) -> str:
     if not content:
         return "(file exists but has no section content)"
 
-    tok_count = _count_tokens(content)
+    tok_count = _estimate_gemma_tokens(content)
 
     # Build heading tree
     _kb_dir = Path(KNOWLEDGE_PATH)
@@ -157,6 +174,14 @@ def read_knowledge(filename: str) -> str:
         raw = ""
 
     tree = _build_heading_tree(raw, filename) if raw else None
+    if tree:
+        # Enrich tree nodes with LLM summaries from the KB index
+        try:
+            summaries = _get_summaries(filename, source)
+            if summaries:
+                _enrich_tree_summaries(tree, summaries)
+        except Exception:
+            pass  # Index unavailable -- tree still works without summaries
     tree_text = _format_heading_tree(tree) if tree else None
 
     if tree_text:
@@ -217,22 +242,26 @@ def read_knowledge_section(filename: str, section: str) -> str:
 
 @tool
 def search_knowledge(query: str) -> str:
-    """Search knowledge base files by topic. Uses semantic search to find
-    relevant sections across both editable and canon files. Returns
-    filenames, section headings, and summaries -- not full content. Use
-    read_knowledge to load the full content of a file you want to work with."""
-    # Semantic search via KB vector index
+    """Search knowledge base by topic. Returns files grouped by relevance
+    with section outlines and matched sections. Use read_knowledge to get
+    a file's full heading tree, or read_knowledge_section to load content
+    directly if you already know the section name."""
+    # Semantic search via KB vector index (grouped by file)
     hits = _search_kb(query, top_k=10)
 
     if hits:
         lines = []
-        for h in hits:
-            source_tag = " [canon]" if h["source"] == "canon" else ""
-            lines.append(
-                f"-- {h['filename']}{source_tag} (section: \"{h['heading']}\")"
-            )
-            if h.get("summary"):
-                lines.append(f"   {h['summary']}")
+        for file_hit in hits:
+            src = " [canon]" if file_hit["source"] == "canon" else ""
+            ftok = file_hit.get("file_tokens", 0)
+            outline = file_hit.get("file_outline", "")
+            lines.append(f"-- {file_hit['filename']}{src} ({ftok:,} tokens)")
+            if outline:
+                lines.append(f"   sections: {outline}")
+            for h in file_hit["hits"]:
+                lines.append(
+                    f"   > {h['heading']} -- {h.get('summary', '')}"
+                )
         return "\n".join(lines)
 
     # Fallback to substring search if KB index is empty (first run)
@@ -339,3 +368,93 @@ def update_project_context(project_path: str, project_name: str) -> str:
         return f"Updated CLAUDE.md at {path}"
     except Exception as e:
         return f"Error updating project context: {e}"
+
+
+# -- Entity registry tools --
+
+
+@tool
+def lookup_entity(name: str) -> str:
+    """Look up a named entity (person, place, project, concept, etc.) by name
+    or alias. Returns the entity's canonical name, type, aliases, summary,
+    and mention count. Use this to check if you already know about someone
+    or something before asking the user."""
+    entity = _resolve_entity(name)
+    if not entity:
+        # Try substring search as fallback
+        matches = _search_entities(name)
+        if matches:
+            lines = [f"No exact match for '{name}'. Similar entities:"]
+            for m in matches[:5]:
+                aliases = ", ".join(m["aliases"]) if m["aliases"] else "none"
+                lines.append(
+                    f"- {m['name']} ({m['entity_type']}) -- "
+                    f"aliases: {aliases} -- {m['summary'] or 'no summary'}"
+                )
+            return "\n".join(lines)
+        return f"No entity found for '{name}'."
+
+    aliases = ", ".join(entity["aliases"]) if entity["aliases"] else "none"
+    return (
+        f"Name: {entity['name']}\n"
+        f"Type: {entity['entity_type']}\n"
+        f"Aliases: {aliases}\n"
+        f"Summary: {entity['summary'] or '(no summary yet)'}\n"
+        f"Mentions: {entity['mention_count']}\n"
+        f"First seen: {entity['first_seen']}\n"
+        f"Last seen: {entity['last_seen']}"
+    )
+
+
+@tool
+def manage_entity(
+    name: str,
+    action: str,
+    value: str = "",
+) -> str:
+    """Manage the entity registry. Actions:
+    - 'add_alias': add an alias for an existing entity (value = the alias)
+    - 'update_summary': set an entity's summary (value = new summary)
+    - 'register': create a new entity (value = entity type: person/place/project/concept/organization/thing)
+    - 'list': list all entities (name is ignored, value = optional type filter)
+
+    Entities are automatically extracted from conversations. Use this tool
+    to manually correct, merge, or enrich entity records."""
+    action = action.lower().strip()
+
+    if action == "list":
+        entities = _list_entities(entity_type=value if value else None, limit=30)
+        if not entities:
+            return "No entities registered yet."
+        lines = []
+        for e in entities:
+            aliases = ", ".join(e["aliases"]) if e["aliases"] else ""
+            alias_str = f" (aka {aliases})" if aliases else ""
+            lines.append(
+                f"- {e['name']}{alias_str} [{e['entity_type']}] "
+                f"x{e['mention_count']} -- {e['summary'] or 'no summary'}"
+            )
+        return "\n".join(lines)
+
+    if action == "register":
+        entity = _register_entity(name, entity_type=value or "thing")
+        return f"Registered: {entity['name']} ({entity['entity_type']})"
+
+    # For add_alias and update_summary, resolve the entity first
+    entity = _resolve_entity(name)
+    if not entity:
+        return f"Entity '{name}' not found. Register it first."
+
+    if action == "add_alias":
+        if not value:
+            return "Provide the alias as the value parameter."
+        updated = _add_alias(entity["id"], value)
+        return f"Added alias '{value}' to {updated['name']}. Aliases: {', '.join(updated['aliases'])}"
+
+    if action == "update_summary":
+        if not value:
+            return "Provide the summary as the value parameter."
+        updated = _update_summary(entity["id"], value)
+        return f"Updated summary for {updated['name']}."
+
+    return f"Unknown action: {action}. Use add_alias, update_summary, register, or list."

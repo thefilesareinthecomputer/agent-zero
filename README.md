@@ -12,7 +12,8 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 
 - **Text chat** via browser (SSE streaming) or terminal CLI
 - **Voice chat** via WebSocket -- wake word detection, Whisper STT, macOS TTS
-- **Long-term memory** -- every conversation is embedded in ChromaDB with smart deduplication, contradiction detection, and LLM-based novelty filtering
+- **Long-term memory** -- every conversation is embedded in ChromaDB (nomic-embed-text, 8192 token context) with smart deduplication, contradiction detection, LLM-based novelty filtering, compact summaries for low-cost injection, and soft decay (recency as tiebreaker, never a filter)
+- **Entity registry** -- SQLite-backed store of named entities (people, places, projects, concepts) automatically extracted from conversations via e2b, with alias dedup and mention tracking
 - **Knowledge base** -- Obsidian-compatible markdown files the agent owns and manages, with semantic search, heading trees (H1-H5 with subtree token counts), and three-step retrieval (search summaries -> browse tree -> load sections)
 - **Multi-model orchestration** -- e4b handles chat, e2b handles tagging, 26b loads on-demand for KB file creation (draft/refine pipeline) or manual toggle, then unloads immediately
 - **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
@@ -36,9 +37,10 @@ cp .env.example .env
 # Edit .env: set API_TOKEN and review model names
 
 # Install and start Ollama, then pull models
-ollama pull gemma4:e4b    # chat model (default)
-ollama pull gemma4:e2b    # memory tagger (lightweight)
-ollama pull gemma4:26b    # KB refinement (loads on-demand)
+ollama pull gemma4:e4b       # chat model (default)
+ollama pull gemma4:e2b       # memory tagger (lightweight)
+ollama pull gemma4:26b       # KB refinement (loads on-demand)
+ollama pull nomic-embed-text # embedding model for semantic search
 
 # Run the CLI
 python -m agent.run
@@ -150,20 +152,21 @@ Three models with clear lifecycle roles. One large model at a time in VRAM.
 |------|---------|-----------|-----------|-------|
 | Chat (daily driver) | `gemma4:e4b` | ~3 GB | Always loaded | All chat, tool calls, context assembly |
 | KB refinement | `gemma4:26b` | ~17 GB | On-demand | Loads for KB file editing or UI toggle, unloads immediately |
-| Tagger | `gemma4:e2b` | ~2 GB | On-demand | Memory tagging, KB index summaries, dropped after batch |
+| Tagger | `gemma4:e2b` | ~2 GB | On-demand | Memory tagging, KB index summaries, memory summaries, dropped after batch |
+| Embeddings | `nomic-embed-text` | ~300 MB | On-demand | 8192 token context, 768 dims. All ChromaDB collections. |
 | Voice | `gemma4:e4b` | ~3 GB | Always loaded | Short answers, commands. Web voice chat. |
 | Heavy (optional) | `gemma4:31b` | ~20 GB | On-demand | Dense. Complex tasks. |
 | Reasoning (optional) | `llama3.3:70b` | ~42 GB | On-demand | Unload chat model first. |
 | Code (optional) | `qwen3-coder:30b` | ~18 GB | On-demand | Code-specific tasks. |
 | Vision (optional) | `qwen3-vl:30b` | ~18 GB | On-demand | Image/document understanding. |
 
-**VRAM rules:** e4b + e2b can coexist (~5 GB). When 26b loads for KB work, e4b unloads; when 26b finishes, e4b reloads automatically. Model lifecycle is managed by `bridge/models.py`.
+**VRAM rules:** e4b + e2b + nomic-embed-text can coexist (~5.3 GB). When 26b loads for KB work, e4b unloads; when 26b finishes, e4b reloads automatically. Model lifecycle is managed by `bridge/models.py`.
 
 **KB draft/refine flow:** when the agent creates or significantly edits a knowledge file, e4b writes a rough draft with improvement instructions, then 26b loads, refines the draft in a single turn, saves the final version, and unloads. The handoff is transparent -- tool calls show the swap in the chat stream.
 
 **Running on less RAM:** swap the chat model for something smaller. `gemma2:9b`, `mistral:7b`, or `phi3:medium` all work -- change `FAST_TEXT_MODEL` in `.env`. The architecture is model-agnostic.
 
-**Memory headroom on 64 GB:** chat (E4B) + tagger (E2B) + Whisper ≈ 6 GB idle. 26B loads on-demand for KB writes (~17 GB), then unloads. Set `NUM_CTX=65536` -- Ollama defaults to 2048--4096, not the model's full 256K capability.
+**Memory headroom on 64 GB:** chat (E4B) + tagger (E2B) + embeddings (nomic-embed-text) + Whisper ≈ 6.3 GB idle. 26B loads on-demand for KB writes (~17 GB), then unloads. Set `NUM_CTX=65536` -- Ollama defaults to 2048--4096, not the model's full 256K capability.
 
 
 ---
@@ -194,9 +197,11 @@ agent-zero/
 │   ├── chunker.py                # Section-based markdown chunking (H1-H5), heading tree
 │   └── tokenizer.py              # Token counting via tiktoken cl100k_base
 ├── memory/
+│   ├── embeddings.py             # OllamaEmbedding -- shared nomic-embed-text for all ChromaDB collections
 │   ├── vector_store.py           # ChromaDB wrapper
 │   ├── tagger.py                 # LLM-based category/subcategory tagging + novelty check
-│   └── memory_manager.py         # Pipeline: noise filter, dedup, contradiction, novelty, prune
+│   ├── entity_registry.py        # SQLite entity store -- names, aliases, types, LLM extraction
+│   └── memory_manager.py         # Pipeline: noise filter, dedup, contradiction, novelty, prune, summaries, entity extraction
 ├── voice/
 │   ├── vad.py                    # Silero-VAD state machine
 │   ├── stt.py                    # Whisper-MLX STT + wake word extraction
@@ -211,6 +216,7 @@ agent-zero/
 ├── scripts/
 │   ├── az                        # CLI launcher (symlink to /usr/local/bin/az)
 │   ├── az-api                    # API server launcher
+│   ├── reembed.py                # One-time migration: re-embed ChromaDB with new embedding model
 │   └── setup_ollama.sh           # Ollama env var setup for Apple Silicon
 ├── project_outputs/              # Default output dir for generated CLAUDE.md files
 ├── tests/
@@ -218,10 +224,13 @@ agent-zero/
 │   ├── test_chat_api.py          # SSE auth, WebSocket auth, static serving (10 tests)
 │   ├── test_chunker.py           # Section-based markdown chunking, heading tree (27 tests)
 │   ├── test_claude_md.py         # Bridge scoring, budget, path resolution (18 tests)
-│   ├── test_kb_index.py          # Semantic search, sync, index/remove (14 tests)
+│   ├── test_embeddings.py        # OllamaEmbedding function, model config, batching (4 tests)
+│   ├── test_kb_index.py          # Semantic search, sync, index/remove, grouped results (19 tests)
 │   ├── test_kb_refine.py         # Draft refinement pipeline, swap verification (9 tests)
 │   ├── test_knowledge_store.py   # KB file ops, frontmatter, search, index, log (41 tests)
+│   ├── test_entity_registry.py   # Entity store, resolution, extraction, aliases (42 tests)
 │   ├── test_memory_manager.py    # Memory pipeline, dedup, contradiction, pruning (23 tests)
+│   ├── test_memory_summary.py    # Summary generation, compact retrieval, soft decay (10 tests)
 │   ├── test_models.py            # Model lifecycle, ensure/unload/swap (10 tests)
 │   ├── test_tokenizer.py         # Token counting and truncation (8 tests)
 │   └── test_voice.py             # VAD, wake word, TTS, echo suppression (14 tests)
@@ -245,6 +254,7 @@ REASONING_MODEL=llama3.3:70b
 CODE_MODEL=qwen3-coder:30b
 VISION_MODEL=qwen3-vl:30b
 FINETUNE_MODEL=gemma4:e4b
+EMBED_MODEL=nomic-embed-text
 
 # Ollama
 OLLAMA_BASE_URL=http://localhost:11434
@@ -323,7 +333,9 @@ CLI thread commands: `new` (start fresh thread), `quit`
 | 3b: HTTP API | done | FastAPI, auth, privacy filtering, CRUD |
 | 6: Voice + Web UI | done | Whisper STT, macOS TTS, VAD, SSE chat, WebSocket voice |
 | KB context engineering | done | Semantic search, LLM summaries, token-aware reads, section chunking, 64K context |
-| Model orchestration | done | Three-model lifecycle, on-demand 26b, draft/refine pipeline, 221 tests passing |
+| Model orchestration | done | Three-model lifecycle, on-demand 26b, draft/refine pipeline |
+| Embedding upgrade + memory compression | done | nomic-embed-text (8192 tokens, 768 dims), memory summaries, grouped KB discovery |
+| Soft decay + entity registry | done | Additive recency tiebreaker, SQLite entity store with LLM extraction, token architecture fix, 294 tests passing |
 
 ---
 
@@ -370,7 +382,7 @@ Naive retrieval dumps full file content into the context window. Even a medium-s
 
 The solution is three steps where content never loads automatically:
 
-1. *Passive awareness* -- every user message triggers a semantic search against the KB index. The top 3 chunk summaries (generated by E2B at index time) are injected into the system prompt. The agent knows what exists without loading anything. Cost: ~100 tokens.
+1. *Passive awareness* -- every user message triggers a semantic search against the KB index. The top 3 files are injected into the system prompt with file-level metadata (total tokens, section outline) and the best-matched section summaries. The agent knows what files exist, how big they are, what sections they contain, and which sections matched -- without loading any content. Cost: ~120-160 tokens.
 2. *Active discovery* -- the agent calls `search_knowledge`, which returns filenames, section headings, and summaries. Or calls `read_knowledge`, which returns a heading tree -- the full H1-H5 hierarchy with cumulative token counts per subtree. Neither loads any content. The agent can see that "## Star Schema" costs 6,200 tokens total but its child "### Fact Tables" is only 2,500. Cost: the tree itself, ~50-200 tokens.
 3. *Selective loading* -- the agent calls `read_knowledge_section` to load exactly the sections it chose from the tree. Each load is a deliberate decision -- the agent checks the section's token cost against remaining budget before every call.
 
@@ -393,6 +405,18 @@ The heading tree (H1-H5, `HeadingNode` dataclass with `subtree_tokens` rolled up
 **Why live context budget tracking**
 
 The agent has a 65K token context window shared between the system prompt, conversation history, tool results, and its own response. Without visibility into how much is used, there is no way to make informed loading decisions. A budget line is injected into the system prompt on every turn with tokens used, tokens available, and generation reserve. The system prompt includes hard thresholds (10K: be selective, 5K: stop loading) so the agent degrades gracefully instead of running out of room to respond.
+
+**Why nomic-embed-text instead of ChromaDB's default embeddings**
+
+ChromaDB ships with all-MiniLM-L6-v2 (22M params, 256 token context, 384 dimensions). A typical memory exchange is 100-300 tokens; a KB chunk can be thousands. Everything beyond 256 tokens is invisible to the embedding -- retrieval is flying blind on most content. nomic-embed-text (137M params, 8192 token context, 768 dimensions) covers essentially all stored content. It runs via Ollama at ~300MB VRAM, coexists with the chat and tagger models, and uses the same embedding function for both the conversations and knowledge collections. Swapping models is a one-line config change (`EMBED_MODEL` in `.env`).
+
+**Why compact memory summaries instead of raw exchange injection**
+
+Raw "User: X\nAgent: Y" exchange text costs 80-150 tokens per memory. Three memories per turn = 240-450 tokens of context burned on verbatim recall. A 1-sentence summary generated by e2b at write time costs 30-40 tokens and preserves the semantic core. The compact retrieval function (`get_relevant_context_compact`) returns summaries when available and falls back to raw text for legacy docs, so the transition is non-destructive.
+
+**Why grouped KB search results with file-level metadata**
+
+The original flat search format (`filename: section -- summary`) gave the agent zero structural context about matched files. It couldn't tell how many other sections existed, how large the file was, or whether it needed to call `read_knowledge` to browse the tree. Enriching each indexed chunk with file-level metadata (`file_tokens`, `section_count`, `file_outline`) and grouping search results by file lets the agent see the full picture at discovery time. Cost: ~60-80 extra tokens per turn. Payoff: eliminates unnecessary `read_knowledge` calls, each of which costs a full tool round-trip plus the tree output.
 
 **Why ChromaDB**
 
@@ -444,13 +468,15 @@ Set `ws.binaryType = 'arraybuffer'` before TTS audio arrives (already set in `ap
 
 ## Tests
 
-221 tests, all passing. The suite runs in under 8 seconds with no network calls, no running Ollama instance, and no GPU required -- every external dependency (Ollama, ChromaDB production data, LLM inference) is mocked or replaced with ephemeral fixtures.
+294 tests, all passing. The suite runs in under 25 seconds with no network calls, no running Ollama instance, and no GPU required -- every external dependency (Ollama, ChromaDB production data, LLM inference) is mocked or replaced with ephemeral fixtures.
 
 Coverage spans the full stack:
 
 - **API layer** -- authentication (bearer token, timing-safe comparison), authorization (privacy filtering, path traversal rejection), all CRUD routes, CLAUDE.md generation and write workflows, SSE chat streaming, WebSocket voice auth handshake, static file serving.
-- **Knowledge base** -- file operations (save, read, list, search), frontmatter parsing, tag filtering, filename sanitization, subdirectory handling, auto-generated index and audit log. Semantic search via ChromaDB with ephemeral collections per test. Section-based markdown chunking (H1-H5 detection, recursive splitting, hard-split with token overlap). Heading tree construction with subtree token rollup, tree formatting, deep nesting (H1 through H5), sibling vs. parent-child level handling. Token counting and truncation.
-- **Memory pipeline** -- noise filtering, LLM-based tagging, deduplication (cosine distance threshold), contradiction detection and replacement, novelty checking, TTL pruning, max memory cap enforcement.
+- **Knowledge base** -- file operations (save, read, list, search), frontmatter parsing, tag filtering, filename sanitization, subdirectory handling, auto-generated index and audit log. Semantic search via ChromaDB with ephemeral collections per test. File-level metadata (token counts, section outlines), grouped search results. Section-based markdown chunking (H1-H5 detection, recursive splitting, hard-split with token overlap). Heading tree construction with subtree token rollup, tree formatting, deep nesting (H1 through H5), sibling vs. parent-child level handling. Token counting and truncation.
+- **Embeddings** -- OllamaEmbedding function (model config, Ollama client, batching, host configuration).
+- **Memory pipeline** -- noise filtering, LLM-based tagging, deduplication (cosine distance threshold), contradiction detection and replacement, novelty checking, capacity-only pruning (no age-based deletion), soft decay (additive recency tiebreaker). Compact summary generation (LLM and fallback paths), compact retrieval, summary metadata storage.
+- **Entity registry** -- registration, resolution by name and alias, touch/update, search, list, delete, summary update, alias management, LLM extraction (mocked), process entities integration, entity count.
 - **Model lifecycle** -- ensure/unload/swap functions for both async and sync contexts, VRAM swap sequencing for KB refinement, `keep_alive=0` unload calls.
 - **KB refinement pipeline** -- draft/refine flow with mocked ChatOllama, swap-to-26b and swap-back verification, fallback behavior on empty responses and LLM errors, save and re-index after refinement.
 - **CLAUDE.md bridge** -- recency decay scoring, canon bonus, budget-aware file selection, path resolution (absolute vs. relative), truncation handling.

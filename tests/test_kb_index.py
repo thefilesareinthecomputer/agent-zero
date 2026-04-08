@@ -12,6 +12,7 @@ import pytest
 
 import knowledge.kb_index as kb_index_mod
 from knowledge.kb_index import (
+    get_summaries,
     index_file,
     remove_file,
     search_kb,
@@ -112,6 +113,82 @@ class TestIndexFile:
         assert "mtime" in meta
         assert "token_count" in meta
 
+    def test_file_level_metadata(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Each chunk should carry file-level stats."""
+        content = _structured_file([
+            ("Alpha", "Content about alpha."),
+            ("Beta", "Content about beta."),
+        ])
+        _write_kb_file(tmp_path, "test.md", content)
+        index_file("test.md", "knowledge", base_dir=tmp_path)
+
+        results = _ephemeral_collection.get(include=["metadatas"])
+        for meta in results["metadatas"]:
+            assert "file_tokens" in meta
+            assert meta["file_tokens"] > 0
+            assert meta["section_count"] == 2
+            assert "file_outline" in meta
+            assert "Alpha" in meta["file_outline"]
+            assert "Beta" in meta["file_outline"]
+
+    def test_tags_and_project_in_metadata(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Chunks should carry the file's frontmatter tags and project."""
+        tag_lines = "\n".join(f"  - {t}" for t in ["data-modeling", "sql"])
+        content = (
+            f"---\n"
+            f"date-created: 2026-04-08\n"
+            f"last-modified: 2026-04-08\n"
+            f"tags:\n"
+            f"{tag_lines}\n"
+            f"project: analytics\n"
+            f"---\n"
+            f"## Topic\nContent.\n"
+        )
+        _write_kb_file(tmp_path, "tagged.md", content)
+        index_file("tagged.md", "knowledge", base_dir=tmp_path)
+
+        results = _ephemeral_collection.get(include=["metadatas"])
+        meta = results["metadatas"][0]
+        assert "tags" in meta
+        assert "data-modeling" in meta["tags"]
+        assert "sql" in meta["tags"]
+        assert meta["project"] == "analytics"
+
+    def test_no_tags_stored_as_empty(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Files without tags should have empty string, not missing key."""
+        content = "---\ndate-created: 2026-04-08\nlast-modified: 2026-04-08\ntags:\n  - test\n---\n## A\nContent.\n"
+        _write_kb_file(tmp_path, "test.md", content)
+        index_file("test.md", "knowledge", base_dir=tmp_path)
+
+        results = _ephemeral_collection.get(include=["metadatas"])
+        meta = results["metadatas"][0]
+        assert "tags" in meta
+        assert "project" in meta
+
+
+class TestGetSummaries:
+    def test_returns_heading_summary_map(self, tmp_path, mock_summary, _ephemeral_collection):
+        content = _structured_file([
+            ("Intro", "Introduction to the topic."),
+            ("Details", "Detailed information here."),
+        ])
+        _write_kb_file(tmp_path, "test.md", content)
+        index_file("test.md", "knowledge", base_dir=tmp_path)
+
+        summaries = get_summaries("test.md", "knowledge")
+        assert "Intro" in summaries
+        assert "Details" in summaries
+        assert summaries["Intro"] == "Summary of Intro"
+        assert summaries["Details"] == "Summary of Details"
+
+    def test_returns_empty_for_unindexed_file(self, _ephemeral_collection):
+        summaries = get_summaries("nonexistent.md", "knowledge")
+        assert summaries == {}
+
+    def test_returns_empty_on_empty_collection(self, _ephemeral_collection):
+        summaries = get_summaries("anything.md", "knowledge")
+        assert summaries == {}
+
 
 class TestRemoveFile:
     def test_removes_all_chunks(self, tmp_path, mock_summary, _ephemeral_collection):
@@ -141,15 +218,45 @@ class TestSearchKb:
         results = search_kb("neural networks", top_k=5)
         assert len(results) > 0
 
-    def test_result_has_discovery_fields(self, tmp_path, mock_summary, _ephemeral_collection):
+    def test_result_grouped_by_file(self, tmp_path, mock_summary, _ephemeral_collection):
+        """search_kb should return results grouped by filename."""
+        content = _structured_file([
+            ("Topic A", "Content about topic A."),
+            ("Topic B", "Content about topic B."),
+        ])
+        _write_kb_file(tmp_path, "test.md", content)
+        index_file("test.md", "knowledge", base_dir=tmp_path)
+
+        results = search_kb("topic", top_k=5)
+        # Single file should produce single group
+        assert len(results) == 1
+        file_hit = results[0]
+        assert file_hit["filename"] == "test.md"
+        assert file_hit["source"] == "knowledge"
+        assert len(file_hit["hits"]) == 2
+
+    def test_grouped_result_has_file_metadata(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Grouped results should include file-level metadata."""
         content = _structured_file([("Topic", "Content.")])
         _write_kb_file(tmp_path, "test.md", content)
         index_file("test.md", "knowledge", base_dir=tmp_path)
 
         results = search_kb("topic", top_k=5)
-        assert len(results) == 1
-        hit = results[0]
-        for field in ("filename", "source", "heading", "summary", "chunk_index", "distance"):
+        file_hit = results[0]
+        for field in ("filename", "source", "file_tokens", "section_count", "file_outline", "hits"):
+            assert field in file_hit, f"Missing field: {field}"
+        assert file_hit["file_tokens"] > 0
+        assert file_hit["section_count"] == 1
+
+    def test_hit_has_discovery_fields(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Individual hits within a file group should have heading, summary, distance."""
+        content = _structured_file([("Topic", "Content.")])
+        _write_kb_file(tmp_path, "test.md", content)
+        index_file("test.md", "knowledge", base_dir=tmp_path)
+
+        results = search_kb("topic", top_k=5)
+        hit = results[0]["hits"][0]
+        for field in ("heading", "summary", "chunk_index", "distance"):
             assert field in hit, f"Missing field: {field}"
 
     def test_no_full_content_in_results(self, tmp_path, mock_summary, _ephemeral_collection):
@@ -158,13 +265,40 @@ class TestSearchKb:
         index_file("test.md", "knowledge", base_dir=tmp_path)
 
         results = search_kb("topic", top_k=5)
-        hit = results[0]
-        # Should NOT contain the full content field
-        assert "content" not in hit
+        file_hit = results[0]
+        # Should NOT contain the full content field at file or hit level
+        assert "content" not in file_hit
+        assert "content" not in file_hit["hits"][0]
 
     def test_empty_collection_returns_empty(self, _ephemeral_collection):
         results = search_kb("anything", top_k=5)
         assert results == []
+
+    def test_multiple_files_grouped_separately(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Results from different files should be in different groups."""
+        content_a = _structured_file([("Neural Nets", "Deep learning overview.")])
+        content_b = _structured_file([("SQL Basics", "Relational database intro.")])
+        _write_kb_file(tmp_path, "ml.md", content_a)
+        _write_kb_file(tmp_path, "db.md", content_b)
+        index_file("ml.md", "knowledge", base_dir=tmp_path)
+        index_file("db.md", "knowledge", base_dir=tmp_path)
+
+        results = search_kb("learning databases", top_k=5)
+        filenames = {r["filename"] for r in results}
+        assert len(filenames) == 2
+
+    def test_files_sorted_by_best_hit(self, tmp_path, mock_summary, _ephemeral_collection):
+        """Files should be ordered by their best (lowest distance) hit."""
+        content_a = _structured_file([("Exact Match Topic", "This is about exact match topic.")])
+        content_b = _structured_file([("Unrelated", "Something completely different.")])
+        _write_kb_file(tmp_path, "relevant.md", content_a)
+        _write_kb_file(tmp_path, "other.md", content_b)
+        index_file("relevant.md", "knowledge", base_dir=tmp_path)
+        index_file("other.md", "knowledge", base_dir=tmp_path)
+
+        results = search_kb("exact match topic", top_k=5)
+        # The more relevant file should come first
+        assert results[0]["filename"] == "relevant.md"
 
 
 class TestSyncKbIndex:

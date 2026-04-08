@@ -52,6 +52,10 @@ async def lifespan(app: FastAPI):
     if len(API_TOKEN) < 32:
         raise RuntimeError("API_TOKEN must be at least 32 characters")
 
+    # Initialize entity registry
+    from memory.entity_registry import init_db as init_entity_db
+    init_entity_db()
+
     # Init agents (chat + voice) with async checkpointer
     from agent.agent import create_async_agent
     from bridge.chat import init_agents, set_voice_ready
@@ -200,14 +204,15 @@ async def search_knowledge(
 
     if hits:
         results = []
-        for h in hits:
-            if h["filename"] not in private:
-                results.append(SearchResult(
-                    filename=h["filename"],
-                    source=h["source"],
-                    heading=h.get("heading", ""),
-                    summary=h.get("summary", ""),
-                ))
+        for file_hit in hits:
+            if file_hit["filename"] not in private:
+                for h in file_hit["hits"]:
+                    results.append(SearchResult(
+                        filename=file_hit["filename"],
+                        source=file_hit["source"],
+                        heading=h.get("heading", ""),
+                        summary=h.get("summary", ""),
+                    ))
         return results
 
     # Fallback to substring search if KB index is empty

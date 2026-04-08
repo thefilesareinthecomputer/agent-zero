@@ -10,7 +10,9 @@ from agent.config import CHAT_MODEL, KB_REFINE_MODEL, KNOWLEDGE_CANON_PATH
 from knowledge.knowledge_store import list_files as kb_list_files
 
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
+from memory.entity_registry import init_db as init_entity_db, entity_count
 from memory.memory_manager import (
+    MAX_MEMORIES,
     forget_all,
     forget_last,
     list_memories,
@@ -98,16 +100,20 @@ def run_cli() -> None:
 
     agent, checkpointer = create_agent(model=model)
 
-    # Prune stale memories on startup
+    # Enforce memory capacity cap on startup
     pruned = prune()
     if pruned > 0:
-        print(f"Pruned {pruned} stale memories.")
+        print(f"Pruned {pruned} overflow memories (capacity cap: {MAX_MEMORIES}).")
+
+    # Initialize entity registry
+    init_entity_db()
 
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
     label = "26B" if use_heavy else "4B"
-    print(f"Ready ({label}). Thread: {thread_id[:8]} | Memories: {memory_count()}")
+    n_entities = entity_count()
+    print(f"Ready ({label}). Thread: {thread_id[:8]} | Memories: {memory_count()} | Entities: {n_entities}")
     print("-" * 40)
 
     try:

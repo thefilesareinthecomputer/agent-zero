@@ -6,6 +6,7 @@ from knowledge.chunker import (
     HeadingNode,
     build_heading_tree,
     chunk_file,
+    enrich_tree_summaries,
     format_heading_tree,
 )
 
@@ -306,3 +307,73 @@ class TestFormatHeadingTree:
         branch_line = [l for l in output.split("\n") if "Branch" in l][0]
         # Branch should show subtree tokens (larger than any single leaf)
         assert "tokens" in branch_line
+
+    def test_summary_shown_when_present(self):
+        body = "## Topic\nSome content here.\n"
+        tree = build_heading_tree(_make_file(body), "test.md")
+        tree.children[0].summary = "Covers the main topic"
+        output = format_heading_tree(tree)
+        topic_line = [l for l in output.split("\n") if "Topic" in l][0]
+        assert "-- Covers the main topic" in topic_line
+
+    def test_no_summary_dash_when_empty(self):
+        body = "## Topic\nSome content here.\n"
+        tree = build_heading_tree(_make_file(body), "test.md")
+        # No summary set (default empty string)
+        output = format_heading_tree(tree)
+        topic_line = [l for l in output.split("\n") if "Topic" in l][0]
+        assert "--" not in topic_line
+
+
+class TestEnrichTreeSummaries:
+    def test_attaches_summaries_to_nodes(self):
+        body = (
+            "## Alpha\nContent alpha.\n\n"
+            "## Beta\nContent beta.\n"
+        )
+        tree = build_heading_tree(_make_file(body), "test.md")
+        summaries = {
+            "Alpha": "Summary of alpha",
+            "Beta": "Summary of beta",
+        }
+        enrich_tree_summaries(tree, summaries)
+        assert tree.children[0].summary == "Summary of alpha"
+        assert tree.children[1].summary == "Summary of beta"
+
+    def test_case_insensitive_matching(self):
+        body = "## Overview\nContent.\n"
+        tree = build_heading_tree(_make_file(body), "test.md")
+        summaries = {"overview": "File overview section"}
+        enrich_tree_summaries(tree, summaries)
+        assert tree.children[0].summary == "File overview section"
+
+    def test_unmatched_headings_stay_empty(self):
+        body = (
+            "## Matched\nContent.\n\n"
+            "## Unmatched\nContent.\n"
+        )
+        tree = build_heading_tree(_make_file(body), "test.md")
+        summaries = {"Matched": "Has a summary"}
+        enrich_tree_summaries(tree, summaries)
+        assert tree.children[0].summary == "Has a summary"
+        assert tree.children[1].summary == ""
+
+    def test_nested_nodes_enriched(self):
+        body = (
+            "## Parent\n"
+            "### Child\nContent.\n"
+        )
+        tree = build_heading_tree(_make_file(body), "test.md")
+        summaries = {
+            "Parent": "Parent summary",
+            "Child": "Child summary",
+        }
+        enrich_tree_summaries(tree, summaries)
+        assert tree.children[0].summary == "Parent summary"
+        assert tree.children[0].children[0].summary == "Child summary"
+
+    def test_empty_summaries_dict_is_safe(self):
+        body = "## Section\nContent.\n"
+        tree = build_heading_tree(_make_file(body), "test.md")
+        enrich_tree_summaries(tree, {})
+        assert tree.children[0].summary == ""

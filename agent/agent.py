@@ -11,15 +11,18 @@ from langgraph.prebuilt import create_react_agent
 from agent.config import (
     AGENT_DB_PATH, MAIN_MODEL, NUM_CTX, NUM_PREDICT, OLLAMA_BASE_URL,
 )
-from knowledge.tokenizer import count_tokens as _count_tokens
+from knowledge.tokenizer import estimate_gemma_tokens as _estimate_gemma_tokens
 from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
     draft_knowledge, list_knowledge, read_knowledge,
     read_knowledge_section, search_knowledge, save_knowledge,
     update_project_context,
+    lookup_entity, manage_entity,
 )
 from knowledge.kb_index import search_kb as _search_kb, sync_kb_index
-from memory.memory_manager import get_relevant_context, memory_count
+from memory.memory_manager import (
+    get_relevant_context_compact, memory_count,
+)
 
 
 SYSTEM_PROMPT = (
@@ -83,10 +86,15 @@ SYSTEM_PROMPT = (
     "selective -- load only the single most relevant section. When below "
     "5,000, stop loading new content entirely and work with what you "
     "have.\n\n"
+    "You have an entity registry that automatically tracks people, places, "
+    "projects, concepts, and things mentioned in conversations. Use "
+    "lookup_entity to check what you know about someone or something "
+    "before asking the user. Use manage_entity to correct names, add "
+    "aliases, or update summaries.\n\n"
     "You have tools for: checking time, running shell commands, "
-    "reading/writing files, managing knowledge, and updating project "
-    "context. Use them when they help. No preamble. No summaries of what "
-    "you just did unless asked."
+    "reading/writing files, managing knowledge, entity lookup, and "
+    "updating project context. Use them when they help. No preamble. "
+    "No summaries of what you just did unless asked."
 )
 
 TOOLS = [
@@ -94,6 +102,7 @@ TOOLS = [
     draft_knowledge, list_knowledge, read_knowledge,
     read_knowledge_section, search_knowledge, save_knowledge,
     update_project_context,
+    lookup_entity, manage_entity,
 ]
 
 
@@ -112,33 +121,40 @@ def _build_prompt(state: dict) -> list:
     system_content = SYSTEM_PROMPT
 
     if query:
-        # Inject relevant conversation memories
+        # Inject compact memory summaries
         if memory_count() > 0:
-            memories = get_relevant_context(query, top_k=3)
+            memories = get_relevant_context_compact(query, top_k=3)
             if memories:
-                system_content += (
-                    "\n\nRelevant context from past conversations:\n"
-                    + "\n---\n".join(memories)
-                )
+                mem_block = "\n".join(f"- {m}" for m in memories)
+                system_content += "\n\n[Memory]\n" + mem_block
 
-        # Inject relevant KB summaries for topic awareness
+        # Inject relevant KB files grouped with structural context
         try:
-            kb_hits = _search_kb(query, top_k=3)
+            kb_hits = _search_kb(query, top_k=5)
             if kb_hits:
-                system_content += (
-                    "\n\nRelevant knowledge base files:\n"
-                    + "\n".join(
-                        f"- {h['filename']}: {h['heading']} -- {h['summary']}"
-                        for h in kb_hits
+                lines = ["\n\n[Knowledge base]"]
+                for file_hit in kb_hits[:3]:
+                    fn = file_hit["filename"]
+                    src = " [canon]" if file_hit["source"] == "canon" else ""
+                    ftok = file_hit.get("file_tokens", 0)
+                    outline = file_hit.get("file_outline", "")
+                    lines.append(
+                        f"- {fn}{src} ({ftok:,} tokens, "
+                        f"sections: {outline})"
                     )
-                )
+                    for h in file_hit["hits"][:2]:
+                        lines.append(
+                            f"    matched: {h['heading']} -- {h['summary']}"
+                        )
+                system_content += "\n".join(lines)
         except Exception:
             pass  # KB index not available -- skip injection
 
     # Compute context budget status so the agent can manage capacity.
-    # count_tokens already applies a 1.5x safety multiplier for Gemma4.
+    # estimate_gemma_tokens applies a 1.5x multiplier to approximate Gemma4
+    # tokenization from cl100k_base counts. Only used here for budget display.
     all_messages = [SystemMessage(content=system_content)] + list(messages)
-    used_tokens = sum(_count_tokens(m.content) for m in all_messages if hasattr(m, "content") and isinstance(m.content, str))
+    used_tokens = sum(_estimate_gemma_tokens(m.content) for m in all_messages if hasattr(m, "content") and isinstance(m.content, str))
     remaining = NUM_CTX - used_tokens
     generation_reserve = NUM_PREDICT
     available = max(0, remaining - generation_reserve)

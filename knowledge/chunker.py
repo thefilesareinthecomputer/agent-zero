@@ -26,6 +26,7 @@ class HeadingNode:
     own_tokens: int = 0                         # tokens in this node's direct content
     subtree_tokens: int = 0                     # own_tokens + all children's subtree_tokens
     children: list["HeadingNode"] = field(default_factory=list)
+    summary: str = ""                           # LLM-generated summary (populated from index)
 
 
 def _detect_heading_level(body: str) -> int | None:
@@ -176,36 +177,58 @@ def format_heading_tree(root: HeadingNode, indent: int = 0) -> str:
 
     Output looks like:
         dim-modeling-guide (2,450 tokens)
-          ## Overview (320 tokens)
-          ## Star Schema (1,200 tokens)
-            ### Fact Tables (500 tokens)
-            ### Dimension Tables (700 tokens)
-          ## Snowflake Schema (930 tokens)
+          ## Overview (320 tokens) -- Introduces dimensional modeling concepts
+          ## Star Schema (1,200 tokens) -- Covers star schema design patterns
+            ### Fact Tables (500 tokens) -- Fact table grain and measures
+            ### Dimension Tables (700 tokens) -- Conformed dimension design
+          ## Snowflake Schema (930 tokens) -- Normalized variant of star schema
     """
     lines: list[str] = []
     prefix = "  " * indent
 
     if root.level == 0:
         # Root node -- show filename
-        lines.append(f"{root.heading} ({root.subtree_tokens:,} tokens)")
+        root_line = f"{root.heading} ({root.subtree_tokens:,} tokens)"
+        if root.summary:
+            root_line += f" -- {root.summary}"
+        lines.append(root_line)
         for child in root.children:
             lines.append(format_heading_tree(child, indent + 1))
     else:
         hashes = "#" * root.level
+        tok = root.subtree_tokens if root.children else root.own_tokens
+        node_line = f"{prefix}{hashes} {root.heading} ({tok:,} tokens)"
+        if root.summary:
+            node_line += f" -- {root.summary}"
+        lines.append(node_line)
         if root.children:
-            lines.append(
-                f"{prefix}{hashes} {root.heading} "
-                f"({root.subtree_tokens:,} tokens)"
-            )
             for child in root.children:
                 lines.append(format_heading_tree(child, indent + 1))
-        else:
-            lines.append(
-                f"{prefix}{hashes} {root.heading} "
-                f"({root.own_tokens:,} tokens)"
-            )
 
     return "\n".join(lines)
+
+
+def enrich_tree_summaries(
+    node: HeadingNode,
+    summaries: dict[str, str],
+) -> None:
+    """Attach summaries from the KB index to heading tree nodes.
+
+    Walks the tree and sets each node's summary field from the
+    heading -> summary mapping. Matching is case-insensitive.
+    Modifies the tree in place.
+    """
+    # Build lowercase lookup for case-insensitive matching
+    lower_map = {k.lower(): v for k, v in summaries.items()}
+
+    def _walk(n: HeadingNode) -> None:
+        key = n.heading.lower()
+        if key in lower_map:
+            n.summary = lower_map[key]
+        for child in n.children:
+            _walk(child)
+
+    _walk(node)
 
 
 def _chunk_sections(

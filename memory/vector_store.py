@@ -6,6 +6,7 @@ import uuid
 import chromadb
 
 from agent.config import CHROMA_DB_PATH
+from memory.embeddings import OllamaEmbedding
 
 _client: chromadb.ClientAPI | None = None
 _collection: chromadb.Collection | None = None
@@ -19,6 +20,7 @@ def _get_collection() -> chromadb.Collection:
         _collection = _client.get_or_create_collection(
             name="conversations",
             metadata={"hnsw:space": "cosine"},
+            embedding_function=OllamaEmbedding(),
         )
     return _collection
 
@@ -113,6 +115,7 @@ def delete_all() -> None:
         _collection = _client.get_or_create_collection(
             name="conversations",
             metadata={"hnsw:space": "cosine"},
+            embedding_function=OllamaEmbedding(),
         )
 
 
