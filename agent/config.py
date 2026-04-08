@@ -26,6 +26,11 @@ TXTAI_DB_PATH: str = str(_project_root / os.getenv("TXTAI_DB_PATH", "data/txtai_
 KNOWLEDGE_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_PATH", "knowledge"))
 KNOWLEDGE_CANON_PATH: str = str(_project_root / os.getenv("KNOWLEDGE_CANON_PATH", "knowledge_canon"))
 
+# Agent inference
+NUM_CTX: int = int(os.getenv("NUM_CTX", "16384"))
+NUM_PREDICT: int = int(os.getenv("NUM_PREDICT", "2048"))
+FAST_TEXT_MODEL: str = os.getenv("FAST_TEXT_MODEL", "gemma4:e4b")
+
 # API
 API_TOKEN: str = os.getenv("API_TOKEN", "")
 API_PORT: int = int(os.getenv("API_PORT", "8900"))

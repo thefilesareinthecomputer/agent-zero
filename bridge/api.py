@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent.config import API_TOKEN, KNOWLEDGE_CANON_PATH, MAIN_MODEL, VOICE_MODEL, UI_DIR, PROJECT_OUTPUTS_PATH
+from agent.config import API_TOKEN, FAST_TEXT_MODEL, KNOWLEDGE_CANON_PATH, MAIN_MODEL, NUM_CTX, VOICE_MODEL, UI_DIR, PROJECT_OUTPUTS_PATH
 from bridge.api_models import (
     ClaudeMdGenerateRequest,
     ClaudeMdGenerateResponse,
@@ -57,8 +57,9 @@ async def lifespan(app: FastAPI):
     from bridge.chat import init_agents, set_voice_ready
 
     text_agent, checkpointer = await create_async_agent(model=MAIN_MODEL)
+    fast_agent, _ = await create_async_agent(model=FAST_TEXT_MODEL)
     voice_agent, _ = await create_async_agent(model=VOICE_MODEL)
-    init_agents(text_agent, voice_agent, checkpointer)
+    init_agents(text_agent, fast_agent, voice_agent, checkpointer)
 
     # Preload and warm Whisper-MLX (in thread -- GPU-bound)
     try:
@@ -167,6 +168,7 @@ async def health():
         status="ok",
         version=VERSION,
         voice="ready" if is_voice_ready() else "unavailable",
+        ctx_size=NUM_CTX,
     )
 
 
@@ -264,7 +266,7 @@ async def save_knowledge(
     if len(req.content.encode("utf-8")) > _MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Content exceeds 1 MB limit")
 
-    path = save_file(req.filename, req.content, req.tags)
+    path = save_file(req.filename, req.content, req.tags, project=req.project)
     # save_file already calls rebuild_index and append_log internally
     sanitized = Path(path).name
     return SaveResponse(filename=sanitized, message="Saved")

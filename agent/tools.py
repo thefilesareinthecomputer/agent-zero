@@ -160,11 +160,12 @@ def search_knowledge(query: str) -> str:
 
 
 @tool
-def save_knowledge(filename: str, content: str, tags: str) -> str:
+def save_knowledge(filename: str, content: str, tags: str, project: str = "") -> str:
     """Create or update a knowledge base file. Content should be organized as
     ## sections with text underneath. To edit an existing file, read it first
     with read_knowledge, make changes, then save the full updated content.
-    Tags are comma-separated (e.g. 'preferences, food').
+    Tags are comma-separated simple words (e.g. 'ai, memory, agent-zero') -- no colons.
+    Project is an optional project name written as a top-level frontmatter field.
     Cannot overwrite canon (read-only) files."""
     # Block writes to files that exist in canon
     if _is_canon_file(filename):
@@ -172,7 +173,7 @@ def save_knowledge(filename: str, content: str, tags: str) -> str:
 
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     try:
-        path = _kb_save(filename, content, tag_list)
+        path = _kb_save(filename, content, tag_list, project=project or None)
         return f"Saved: {path}"
     except Exception as e:
         return f"Error saving knowledge file: {e}"

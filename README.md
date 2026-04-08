@@ -207,7 +207,7 @@ agent-zero/
 │   ├── test_api.py               # Knowledge CRUD, auth, privacy, CLAUDE.md routes (28 tests)
 │   ├── test_chat_api.py          # SSE auth, WebSocket auth, static serving (10 tests)
 │   ├── test_claude_md.py         # Bridge scoring, budget, path resolution (18 tests)
-│   ├── test_knowledge_store.py   # KB file ops, frontmatter, search, index, log (38 tests)
+│   ├── test_knowledge_store.py   # KB file ops, frontmatter, search, index, log (41 tests)
 │   ├── test_memory_manager.py    # Memory pipeline, dedup, contradiction, pruning (23 tests)
 │   └── test_voice.py             # VAD, wake word, TTS, echo suppression (14 tests)
 ├── optimization/                 # Phase 4 -- DSPy GEPA prompt evolution (planned)

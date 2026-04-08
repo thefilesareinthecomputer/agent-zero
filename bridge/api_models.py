@@ -10,12 +10,14 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     voice: str | None = None
+    ctx_size: int | None = None
 
 
 class FileInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     filename: str
     tags: list[str]
+    project: str
     created: str
     last_modified: str
     source: str
@@ -59,12 +61,14 @@ class SaveRequest(BaseModel):
     filename: str
     content: str
     tags: list[str]
+    project: str | None = None
 
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str
     session_id: str | None = None
+    agent: str = "fast"  # "fast" | "heavy"
 
 
 class ClaudeMdGenerateRequest(BaseModel):

@@ -81,14 +81,17 @@ def kb_dirs(tmp_path):
 
     original_kb_dir = ks_mod.KNOWLEDGE_DIR
     original_canon_dir = api_mod._CANON_DIR
+    original_api_token = api_mod.API_TOKEN
 
     ks_mod.KNOWLEDGE_DIR = kb
     api_mod._CANON_DIR = canon
+    api_mod.API_TOKEN = TOKEN
 
     yield {"knowledge": kb, "canon": canon}
 
     ks_mod.KNOWLEDGE_DIR = original_kb_dir
     api_mod._CANON_DIR = original_canon_dir
+    api_mod.API_TOKEN = original_api_token
 
 
 # -- Auth tests --

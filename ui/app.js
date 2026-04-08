@@ -18,7 +18,7 @@ const messagesEl = document.getElementById('messages');
 
 // -- State --
 let token = localStorage.getItem('az_token') || '';
-let sessionId = sessionStorage.getItem('az_session') || '';
+let sessionId = '';  // fresh session on every page load
 let connected = false;
 let busy = false;
 let micOn = false;
@@ -26,6 +26,7 @@ let audioCtx = null;
 let ws = null;
 let workletNode = null;
 let mediaStream = null;
+let ctxSize = 16384;
 
 // -- Init --
 document.addEventListener('DOMContentLoaded', () => {
@@ -57,7 +58,10 @@ async function tryConnect() {
   try {
     const resp = await fetch('/health');
     if (!resp.ok) throw new Error('Server unreachable');
+    const data = await resp.json();
+    if (data.ctx_size) ctxSize = data.ctx_size;
     setConnected(true);
+    updateCtxBar(0);
   } catch {
     setConnected(false);
   }
@@ -76,11 +80,13 @@ function onDisconnect() {
 
 function setConnected(state) {
   connected = state;
+  const ctxBar = document.getElementById('ctx-bar');
   if (state) {
     tokenInput.classList.add('hidden');
     connectBtn.classList.add('hidden');
     disconnectBtn.classList.remove('hidden');
     inputBar.classList.remove('hidden');
+    ctxBar.classList.remove('hidden');
     statusDot.className = 'dot dot-connected';
     statusDot.title = 'Connected';
   } else {
@@ -88,9 +94,25 @@ function setConnected(state) {
     connectBtn.classList.remove('hidden');
     disconnectBtn.classList.add('hidden');
     inputBar.classList.add('hidden');
+    ctxBar.classList.add('hidden');
     statusDot.className = 'dot dot-disconnected';
     statusDot.title = 'Disconnected';
+    updateCtxBar(0);
   }
+}
+
+function updateCtxBar(promptTokens) {
+  const fill = document.getElementById('ctx-fill');
+  const label = document.getElementById('ctx-label');
+  const bar = document.getElementById('ctx-bar');
+  const pct = ctxSize > 0 ? (promptTokens / ctxSize) * 100 : 0;
+
+  fill.style.width = `${Math.min(pct, 100)}%`;
+  label.textContent = `${promptTokens.toLocaleString()} / ${ctxSize.toLocaleString()} ctx`;
+
+  bar.classList.remove('ctx-warn', 'ctx-danger');
+  if (pct >= 90) bar.classList.add('ctx-danger');
+  else if (pct >= 75) bar.classList.add('ctx-warn');
 }
 
 function setBusy(state) {
@@ -120,7 +142,11 @@ async function onSend() {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ message: msg, session_id: sessionId || null }),
+      body: JSON.stringify({
+        message: msg,
+        session_id: sessionId || null,
+        agent: document.getElementById('agent-select').value,
+      }),
     });
 
     if (resp.status === 429) {
@@ -169,7 +195,7 @@ function handleSSEEvent(type, data, agentMsg) {
   switch (type) {
     case 'session':
       sessionId = data.session_id;
-      sessionStorage.setItem('az_session', sessionId);
+      if (data.model) agentMsg.querySelector('.message-label').textContent = `Agent Zero [${data.model}]`;
       break;
     case 'tool_call':
       appendTool(agentMsg, `[calling ${data.name}...]`);
@@ -179,6 +205,9 @@ function handleSSEEvent(type, data, agentMsg) {
       break;
     case 'token':
       appendToken(agentMsg, data.text);
+      break;
+    case 'usage':
+      updateCtxBar(data.prompt_tokens);
       break;
     case 'done':
       break;

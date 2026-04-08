@@ -37,10 +37,10 @@ def _structured_file(tags: list[str], content: str,
     tag_lines = "\n".join(f"  - {t}" for t in tags)
     return (
         f"---\n"
+        f"date-created: 2026-04-01\n"
+        f"last-modified: {last_modified}\n"
         f"tags:\n"
         f"{tag_lines}\n"
-        f"created: 2026-04-01\n"
-        f"last-modified: {last_modified}\n"
         f"---\n"
         f"# test-file\n\n"
         f"## Overview\n\n"
@@ -97,9 +97,9 @@ class TestListFiles:
         assert results[0]["filename"] == "a.md"
 
     def test_filter_tags_includes_match(self, tmp_path):
-        _write_raw(tmp_path, "match.md", _structured_file(["topic:A"], "relevant"))
-        _write_raw(tmp_path, "skip.md", _structured_file(["topic:B"], "irrelevant"))
-        results = list_files(filter_tags=["topic:A"], base_dir=tmp_path)
+        _write_raw(tmp_path, "match.md", _structured_file(["topic-a"], "relevant"))
+        _write_raw(tmp_path, "skip.md", _structured_file(["topic-b"], "irrelevant"))
+        results = list_files(filter_tags=["topic-a"], base_dir=tmp_path)
         filenames = [r["filename"] for r in results]
         assert "match.md" in filenames
         assert "skip.md" not in filenames
@@ -115,7 +115,7 @@ class TestListFiles:
     def test_result_has_expected_fields(self, tmp_path):
         _write_raw(tmp_path, "file.md", _structured_file(["test"], "content"))
         result = list_files(base_dir=tmp_path)[0]
-        for field in ("filename", "tags", "created", "last_modified", "path"):
+        for field in ("filename", "tags", "project", "created", "last_modified", "path"):
             assert field in result
 
     def test_sorted_by_last_modified_desc(self, tmp_path):
@@ -193,7 +193,7 @@ class TestSaveFile:
         save_file("existing.md", "## V1\nFirst version.", ["x"], base_dir=tmp_path)
         raw_before = (tmp_path / "existing.md").read_text()
         import re
-        match = re.search(r"created: (\S+)", raw_before)
+        match = re.search(r"date-created: (\S+)", raw_before)
         original_created = match.group(1) if match else None
 
         save_file("existing.md", "## V2\nSecond version.", ["x"], base_dir=tmp_path)
@@ -217,6 +217,23 @@ class TestSaveFile:
         log = (tmp_path / "log.md").read_text()
         assert "logged.md" in log
         assert "save" in log
+
+    def test_project_field_in_frontmatter(self, tmp_path):
+        save_file("proj.md", "## Sec\nBody.", ["ai"], project="agent-zero", base_dir=tmp_path)
+        raw = (tmp_path / "proj.md").read_text()
+        assert "project: agent-zero" in raw
+
+    def test_no_project_field_when_omitted(self, tmp_path):
+        save_file("noproj.md", "## Sec\nBody.", ["ai"], base_dir=tmp_path)
+        raw = (tmp_path / "noproj.md").read_text()
+        assert "project:" not in raw
+
+    def test_date_created_field_name(self, tmp_path):
+        import re
+        save_file("dates.md", "## Sec\nBody.", ["tag"], base_dir=tmp_path)
+        frontmatter = (tmp_path / "dates.md").read_text().split("---")[1]
+        assert "date-created:" in frontmatter
+        assert not re.search(r"(?<!date-)created:", frontmatter)
 
 
 # -- get_file_metadata --

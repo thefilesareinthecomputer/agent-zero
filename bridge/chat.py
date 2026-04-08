@@ -13,7 +13,9 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from agent.config import API_TOKEN
+import ollama as _ollama_client
+
+from agent.config import API_TOKEN, FAST_TEXT_MODEL, MAIN_MODEL, OLLAMA_BASE_URL
 from bridge.api_models import ChatRequest
 from memory.memory_manager import store_exchange
 from voice.pipeline import VoiceHandler
@@ -23,17 +25,19 @@ router = APIRouter()
 
 # -- Shared state (initialized by lifespan in api.py) --
 
-_text_agent = None      # gemma4:26b agent
-_voice_agent = None     # gemma4:e4b agent
+_text_agent = None      # gemma4:26b -- heavy tasks, KB, file ops
+_fast_agent = None      # gemma4:e4b -- quick chat
+_voice_agent = None     # gemma4:e4b -- voice pipeline
 _checkpointer = None    # shared AsyncSqliteSaver
 _lock = asyncio.Lock()  # serializes agent access
-_voice_ready = False     # set True after Whisper/VAD loaded
+_voice_ready = False    # set True after Whisper/VAD loaded
 
 
-def init_agents(text_agent, voice_agent, checkpointer):
+def init_agents(text_agent, fast_agent, voice_agent, checkpointer):
     """Called from api.py lifespan to set shared agent instances."""
-    global _text_agent, _voice_agent, _checkpointer
+    global _text_agent, _fast_agent, _voice_agent, _checkpointer
     _text_agent = text_agent
+    _fast_agent = fast_agent
     _voice_agent = voice_agent
     _checkpointer = checkpointer
 
@@ -70,6 +74,8 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
     config = {"configurable": {"thread_id": session_id}}
 
     full_response = ""
+    prompt_tokens = 0
+    completion_tokens = 0
 
     async for chunk in agent.astream(
         {"messages": messages}, config=config, stream_mode="updates"
@@ -79,6 +85,11 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
                 continue
             for msg in node_output["messages"]:
                 if msg.type == "ai":
+                    meta = getattr(msg, "response_metadata", {}) or {}
+                    if "prompt_eval_count" in meta:
+                        prompt_tokens = meta["prompt_eval_count"]
+                    if "eval_count" in meta:
+                        completion_tokens = meta["eval_count"]
                     if msg.tool_calls:
                         for tc in msg.tool_calls:
                             yield "tool_call", {
@@ -95,7 +106,32 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
                         "content": content,
                     }
 
+    if prompt_tokens:
+        yield "usage", {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+
     yield "done", {"full_response": full_response}
+
+
+# -- Model management --
+
+_active_model: str | None = None
+_model_names = {"fast": FAST_TEXT_MODEL, "heavy": MAIN_MODEL}
+
+
+async def _ensure_model(agent_key: str):
+    """Unload the other text model before inference so only one sits in VRAM."""
+    global _active_model
+    wanted = _model_names.get(agent_key, FAST_TEXT_MODEL)
+    if _active_model and _active_model != wanted:
+        try:
+            client = _ollama_client.Client(host=OLLAMA_BASE_URL)
+            await asyncio.to_thread(client.generate, model=_active_model, prompt="", keep_alive=0)
+        except Exception:
+            pass  # best-effort unload
+    _active_model = wanted
 
 
 # -- POST /chat (SSE text) --
@@ -105,24 +141,27 @@ async def chat(
     body: ChatRequest,
     _: str = Depends(verify_token),
 ):
-    """Text chat with SSE streaming response.
-
-    Uses gemma4:26b (text agent). Returns 429 if agent is busy.
-    """
+    """Text chat with SSE streaming response. Returns 429 if agent is busy."""
     session_id = body.session_id or str(uuid.uuid4())
+    agent_key = body.agent if body.agent in ("fast", "heavy") else "fast"
+    agent = _text_agent if agent_key == "heavy" else _fast_agent
 
     if _lock.locked():
         raise HTTPException(status_code=429, detail="Agent busy")
 
     async def event_stream():
-        # Send session ID first
-        yield _sse_event("session", {"session_id": session_id})
+        yield _sse_event("session", {
+            "session_id": session_id,
+            "model": _model_names.get(agent_key, FAST_TEXT_MODEL),
+        })
+
+        await _ensure_model(agent_key)
 
         async with _lock:
             full_response = ""
             try:
                 async for event_type, data in _stream_agent(
-                    _text_agent, body.message, session_id
+                    agent, body.message, session_id
                 ):
                     if event_type == "done":
                         full_response = data["full_response"]

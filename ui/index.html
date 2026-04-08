@@ -22,6 +22,11 @@
       <div id="messages"></div>
     </main>
 
+    <div id="ctx-bar" class="hidden">
+      <div id="ctx-fill"></div>
+      <span id="ctx-label">0 / 16384 ctx</span>
+    </div>
+
     <footer id="input-bar" class="hidden">
       <button id="mic-btn" title="Toggle microphone" class="mic-off">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -31,6 +36,10 @@
           <line x1="8" y1="23" x2="16" y2="23"/>
         </svg>
       </button>
+      <select id="agent-select" title="Model">
+        <option value="fast">4B</option>
+        <option value="heavy">26B</option>
+      </select>
       <input type="text" id="text-input" placeholder="Message Agent Zero..." autocomplete="off">
       <button id="send-btn" title="Send">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

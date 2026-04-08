@@ -150,31 +150,30 @@ def _ensure_section_dividers(content: str) -> str:
 
 
 def _build_file(filename: str, content: str, tags: list[str],
-                created: str | None = None) -> str:
+                created: str | None = None,
+                project: str | None = None) -> str:
     """Assemble a complete knowledge file from parts.
 
     Args:
         filename: The .md filename (used for H1 heading).
         content: H2 section content from the agent.
-        tags: List of tag strings.
+        tags: List of tag strings (simple words, no colons).
         created: ISO date string. Defaults to today if None.
+        project: Optional project name written as a top-level frontmatter field.
     """
     today = date.today().isoformat()
     # Use just the stem of the last path component for the H1
     stem = Path(filename).stem
 
-    meta = {
-        "tags": tags,
-        "created": created or today,
-        "last-modified": today,
-    }
-
     fm_lines = ["---"]
-    fm_lines.append("tags:")
-    for tag in meta["tags"]:
-        fm_lines.append(f"  - {tag}")
-    fm_lines.append(f"created: {meta['created']}")
-    fm_lines.append(f"last-modified: {meta['last-modified']}")
+    fm_lines.append(f"date-created: {created or today}")
+    fm_lines.append(f"last-modified: {today}")
+    if project:
+        fm_lines.append(f"project: {project}")
+    if tags:
+        fm_lines.append("tags:")
+        for tag in tags:
+            fm_lines.append(f"  - {tag}")
     fm_lines.append("---")
     frontmatter = "\n".join(fm_lines)
 
@@ -233,7 +232,8 @@ def list_files(*, filter_tags: list[str] | None = None,
         results.append({
             "filename": _relative_name(path, base),
             "tags": tags,
-            "created": str(meta.get("created", "")),
+            "project": str(meta.get("project", "")),
+            "created": str(meta.get("date-created", meta.get("created", ""))),
             "last_modified": str(meta.get("last-modified", "")),
             "path": str(path),
         })
@@ -272,7 +272,7 @@ def read_file(filename: str, *, base_dir: Path | None = None) -> str | None:
 
 
 def save_file(filename: str, content: str, tags: list[str],
-              *, base_dir: Path | None = None) -> str:
+              *, project: str | None = None, base_dir: Path | None = None) -> str:
     """Create or update a knowledge file.
 
     The agent provides content as H2 sections with body text.
@@ -298,11 +298,11 @@ def save_file(filename: str, content: str, tags: list[str],
         try:
             existing = path.read_text(encoding="utf-8")
             meta, _ = _parse_frontmatter(existing)
-            created = str(meta.get("created", ""))
+            created = str(meta.get("date-created", meta.get("created", "")))
         except (OSError, UnicodeDecodeError):
             pass
 
-    file_content = _build_file(filename, content, tags, created or None)
+    file_content = _build_file(filename, content, tags, created or None, project=project)
     path.write_text(file_content, encoding="utf-8")
 
     # Maintain index and log
@@ -341,7 +341,8 @@ def get_file_metadata(filename: str, *, base_dir: Path | None = None) -> dict | 
     return {
         "filename": _relative_name(path, base),
         "tags": tags,
-        "created": str(meta.get("created", "")),
+        "project": str(meta.get("project", "")),
+        "created": str(meta.get("date-created", meta.get("created", ""))),
         "last_modified": str(meta.get("last-modified", "")),
     }
 

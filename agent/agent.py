@@ -9,17 +9,15 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 from agent.config import (
-    AGENT_DB_PATH, KNOWLEDGE_CANON_PATH, MAIN_MODEL, OLLAMA_BASE_URL,
+    AGENT_DB_PATH, MAIN_MODEL, NUM_CTX, NUM_PREDICT, OLLAMA_BASE_URL,
 )
 from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
     list_knowledge, read_knowledge, search_knowledge, save_knowledge,
     update_project_context,
 )
-from knowledge.knowledge_store import search_files as kb_search
 from memory.memory_manager import get_relevant_context, memory_count
 
-_CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
 
 SYSTEM_PROMPT = (
     "You are Agent Zero, a local AI assistant running on Apple Silicon.\n\n"
@@ -40,9 +38,10 @@ SYSTEM_PROMPT = (
     "in chat history.\n\n"
     "You can also update CLAUDE.md files in project directories using "
     "update_project_context. This assembles relevant knowledge into a file "
-    "that Claude Code reads automatically. Tag knowledge files with "
-    "project:<name> to associate them with a specific project. Only files "
-    "with a matching project tag are included -- untagged files are not. "
+    "that Claude Code reads automatically. When saving a knowledge file with "
+    "save_knowledge, set the project parameter (e.g. project='agent-zero') "
+    "to associate it with a specific project. Only files with a matching "
+    "project value are included in CLAUDE.md -- files without one are not. "
     "Files tagged private or secret are never included in CLAUDE.md.\n\n"
     "Some knowledge files are marked [canon] -- these are read-only reference "
     "files maintained by the user. You cannot edit or delete them. Treat canon "
@@ -77,36 +76,12 @@ def _build_prompt(state: dict) -> list:
     if query:
         # Inject relevant conversation memories
         if memory_count() > 0:
-            memories = get_relevant_context(query, top_k=5)
+            memories = get_relevant_context(query, top_k=3)
             if memories:
                 system_content += (
                     "\n\nRelevant context from past conversations:\n"
                     + "\n---\n".join(memories)
                 )
-
-        # Inject knowledge file hints (lightweight -- filenames only)
-        try:
-            kb_hits = kb_search(query)
-            if kb_hits:
-                file_list = ", ".join(r["filename"] for r in kb_hits)
-                system_content += (
-                    f"\n\nKnowledge base files matching this query: {file_list}"
-                    "\nUse read_knowledge to view their contents if needed."
-                )
-        except Exception:
-            pass  # knowledge search failure should never block the agent
-
-        # Inject canon file hints
-        try:
-            canon_hits = kb_search(query, base_dir=_CANON_DIR)
-            if canon_hits:
-                file_list = ", ".join(r["filename"] for r in canon_hits)
-                system_content += (
-                    f"\n\nCanon knowledge files matching this query: {file_list}"
-                    "\nUse read_knowledge to view their contents if needed."
-                )
-        except Exception:
-            pass
 
     return [SystemMessage(content=system_content)] + list(messages)
 
@@ -128,8 +103,8 @@ def create_agent(
     llm = ChatOllama(
         model=model,
         base_url=OLLAMA_BASE_URL,
-        num_ctx=16384,
-        num_predict=2048,
+        num_ctx=NUM_CTX,
+        num_predict=NUM_PREDICT,
     )
 
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -168,8 +143,8 @@ async def create_async_agent(
     llm = ChatOllama(
         model=model,
         base_url=OLLAMA_BASE_URL,
-        num_ctx=16384,
-        num_predict=2048,
+        num_ctx=NUM_CTX,
+        num_predict=NUM_PREDICT,
     )
 
     conn = await aiosqlite.connect(db_path)
