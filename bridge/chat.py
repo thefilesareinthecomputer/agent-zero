@@ -13,10 +13,9 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-import ollama as _ollama_client
-
-from agent.config import API_TOKEN, FAST_TEXT_MODEL, MAIN_MODEL, OLLAMA_BASE_URL
+from agent.config import API_TOKEN, CHAT_MODEL, KB_REFINE_MODEL
 from bridge.api_models import ChatRequest
+from bridge.models import ensure_model
 from memory.memory_manager import store_exchange
 from voice.pipeline import VoiceHandler
 from voice.tts import stream_tts
@@ -25,21 +24,29 @@ router = APIRouter()
 
 # -- Shared state (initialized by lifespan in api.py) --
 
-_text_agent = None      # gemma4:26b -- heavy tasks, KB, file ops
-_fast_agent = None      # gemma4:e4b -- quick chat
+_chat_agent = None      # gemma4:e4b -- main interaction
+_heavy_agent = None     # gemma4:26b -- lazy-created on first use
 _voice_agent = None     # gemma4:e4b -- voice pipeline
 _checkpointer = None    # shared AsyncSqliteSaver
 _lock = asyncio.Lock()  # serializes agent access
 _voice_ready = False    # set True after Whisper/VAD loaded
 
 
-def init_agents(text_agent, fast_agent, voice_agent, checkpointer):
+def init_agents(chat_agent, voice_agent, checkpointer):
     """Called from api.py lifespan to set shared agent instances."""
-    global _text_agent, _fast_agent, _voice_agent, _checkpointer
-    _text_agent = text_agent
-    _fast_agent = fast_agent
+    global _chat_agent, _voice_agent, _checkpointer
+    _chat_agent = chat_agent
     _voice_agent = voice_agent
     _checkpointer = checkpointer
+
+
+async def _get_heavy_agent():
+    """Lazy-create the 26b agent on first use. Cached for reuse."""
+    global _heavy_agent
+    if _heavy_agent is None:
+        from agent.agent import create_async_agent
+        _heavy_agent, _ = await create_async_agent(model=KB_REFINE_MODEL)
+    return _heavy_agent
 
 
 def set_voice_ready(ready: bool):
@@ -115,23 +122,9 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
     yield "done", {"full_response": full_response}
 
 
-# -- Model management --
+# -- Model name mapping for SSE session event --
 
-_active_model: str | None = None
-_model_names = {"fast": FAST_TEXT_MODEL, "heavy": MAIN_MODEL}
-
-
-async def _ensure_model(agent_key: str):
-    """Unload the other text model before inference so only one sits in VRAM."""
-    global _active_model
-    wanted = _model_names.get(agent_key, FAST_TEXT_MODEL)
-    if _active_model and _active_model != wanted:
-        try:
-            client = _ollama_client.Client(host=OLLAMA_BASE_URL)
-            await asyncio.to_thread(client.generate, model=_active_model, prompt="", keep_alive=0)
-        except Exception:
-            pass  # best-effort unload
-    _active_model = wanted
+_model_names = {"fast": CHAT_MODEL, "heavy": KB_REFINE_MODEL}
 
 
 # -- POST /chat (SSE text) --
@@ -144,7 +137,13 @@ async def chat(
     """Text chat with SSE streaming response. Returns 429 if agent is busy."""
     session_id = body.session_id or str(uuid.uuid4())
     agent_key = body.agent if body.agent in ("fast", "heavy") else "fast"
-    agent = _text_agent if agent_key == "heavy" else _fast_agent
+
+    if agent_key == "heavy":
+        agent = await _get_heavy_agent()
+        model_name = KB_REFINE_MODEL
+    else:
+        agent = _chat_agent
+        model_name = CHAT_MODEL
 
     if _lock.locked():
         raise HTTPException(status_code=429, detail="Agent busy")
@@ -152,10 +151,10 @@ async def chat(
     async def event_stream():
         yield _sse_event("session", {
             "session_id": session_id,
-            "model": _model_names.get(agent_key, FAST_TEXT_MODEL),
+            "model": model_name,
         })
 
-        await _ensure_model(agent_key)
+        await ensure_model(model_name)
 
         async with _lock:
             full_response = ""

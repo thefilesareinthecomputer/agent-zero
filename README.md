@@ -13,7 +13,8 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 - **Text chat** via browser (SSE streaming) or terminal CLI
 - **Voice chat** via WebSocket -- wake word detection, Whisper STT, macOS TTS
 - **Long-term memory** -- every conversation is embedded in ChromaDB with smart deduplication, contradiction detection, and LLM-based novelty filtering
-- **Knowledge base** -- Obsidian-compatible markdown files the agent reads and writes, tagged and searchable
+- **Knowledge base** -- Obsidian-compatible markdown files the agent owns and manages, with semantic search (ChromaDB vectors + LLM-generated summaries), token-aware retrieval, and section-based chunking
+- **Multi-model orchestration** -- e4b handles chat, e2b handles tagging, 26b loads on-demand for KB file creation (draft/refine pipeline) or manual toggle, then unloads immediately
 - **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
 - **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
 
@@ -35,8 +36,9 @@ cp .env.example .env
 # Edit .env: set API_TOKEN and review model names
 
 # Install and start Ollama, then pull models
-ollama pull gemma4:26b    # main model
+ollama pull gemma4:e4b    # chat model (default)
 ollama pull gemma4:e2b    # memory tagger (lightweight)
+ollama pull gemma4:26b    # KB refinement (loads on-demand)
 
 # Run the CLI
 python -m agent.run
@@ -44,12 +46,7 @@ python -m agent.run
 # Or run the web UI + API server
 python -m bridge.api_run
 # Opens at http://127.0.0.1:8900
-```
-
-For voice chat, also pull the voice model and set up Whisper:
-```bash
-ollama pull gemma4:e4b
-# Whisper-MLX downloads on first startup (Apple Silicon only)
+# Whisper-MLX downloads on first startup (Apple Silicon only, needed for voice)
 ```
 
 
@@ -133,10 +130,11 @@ This configuration runs the 26B MoE main model, 2B tagger, voice model, and Whis
     │            │            │
 ┌───┴───┐ ┌─────┴─────┐ ┌───┴────┐
 │Ollama │ │  Memory   │ │ Tools  │
-│Gemma4 │ │ SQLite    │ │ shell  │
-│26B MoE│ │ ChromaDB  │ │ files  │
-│+ E2B  │ │           │ │ KB     │
+│E4B    │ │ SQLite    │ │ shell  │
+│E2B    │ │ ChromaDB  │ │ files  │
+│26B*   │ │ KB index  │ │ KB     │
 └───────┘ └───────────┘ └────────┘
+          * 26B loads on-demand
 ```
 
 Agent Zero runs persistently and remembers everything. Claude Code is a separate tool you use for coding -- it reads the `CLAUDE.md` files Agent Zero writes. Neither process runs inside the other.
@@ -146,19 +144,26 @@ Agent Zero runs persistently and remembers everything. Claude Code is a separate
 
 ## Models
 
-| Role | Default | Size (Q4) | Notes |
-|------|---------|-----------|-------|
-| Main (text chat) | `gemma4:26b` | ~17 GB | MoE, 4B active params. Fast + capable. |
-| Voice | `gemma4:e4b` | ~3 GB | Short answers, commands. Web voice chat. |
-| Tagger | `gemma4:e2b` | ~2 GB | Memory classification, novelty checking. |
-| Heavy | `gemma4:31b` | ~20 GB | Dense. Available on-demand for complex tasks. |
-| Reasoning | `llama3.3:70b` | ~42 GB | Load on-demand, unload main first. |
-| Code | `qwen3-coder:30b` | ~18 GB | Code-specific tasks. |
-| Vision | `qwen3-vl:30b` | ~18 GB | Image/document understanding. |
+Three models with clear lifecycle roles. One large model at a time in VRAM.
 
-**Running on less RAM:** swap the main model for something smaller. `gemma2:9b`, `mistral:7b`, or `phi3:medium` all work -- change `MAIN_MODEL` in `.env`. The architecture is model-agnostic.
+| Role | Default | Size (Q4) | Lifecycle | Notes |
+|------|---------|-----------|-----------|-------|
+| Chat (daily driver) | `gemma4:e4b` | ~3 GB | Always loaded | All chat, tool calls, context assembly |
+| KB refinement | `gemma4:26b` | ~17 GB | On-demand | Loads for KB file editing or UI toggle, unloads immediately |
+| Tagger | `gemma4:e2b` | ~2 GB | On-demand | Memory tagging, KB index summaries, dropped after batch |
+| Voice | `gemma4:e4b` | ~3 GB | Always loaded | Short answers, commands. Web voice chat. |
+| Heavy (optional) | `gemma4:31b` | ~20 GB | On-demand | Dense. Complex tasks. |
+| Reasoning (optional) | `llama3.3:70b` | ~42 GB | On-demand | Unload chat model first. |
+| Code (optional) | `qwen3-coder:30b` | ~18 GB | On-demand | Code-specific tasks. |
+| Vision (optional) | `qwen3-vl:30b` | ~18 GB | On-demand | Image/document understanding. |
 
-**Memory headroom on 64 GB:** main (26B MoE) + tagger (E2B) + voice (E4B) + Whisper ≈ 22 GB. Set `num_ctx=16384` -- Ollama defaults to 2048--4096, not the model's full 256K capability. Unload the main model before loading 70B: `curl http://localhost:11434/api/generate -d '{"model": "gemma4:26b", "keep_alive": 0}'`
+**VRAM rules:** e4b + e2b can coexist (~5 GB). When 26b loads for KB work, e4b unloads; when 26b finishes, e4b reloads automatically. Model lifecycle is managed by `bridge/models.py`.
+
+**KB draft/refine flow:** when the agent creates or significantly edits a knowledge file, e4b writes a rough draft with improvement instructions, then 26b loads, refines the draft in a single turn, saves the final version, and unloads. The handoff is transparent -- tool calls show the swap in the chat stream.
+
+**Running on less RAM:** swap the chat model for something smaller. `gemma2:9b`, `mistral:7b`, or `phi3:medium` all work -- change `FAST_TEXT_MODEL` in `.env`. The architecture is model-agnostic.
+
+**Memory headroom on 64 GB:** chat (E4B) + tagger (E2B) + Whisper ≈ 6 GB idle. 26B loads on-demand for KB writes (~17 GB), then unloads. Set `NUM_CTX=65536` -- Ollama defaults to 2048--4096, not the model's full 256K capability.
 
 
 ---
@@ -174,15 +179,20 @@ agent-zero/
 │   ├── agent.py                  # LangGraph ReAct agent, SQLite checkpointing, memory injection
 │   ├── config.py                 # .env-driven config
 │   ├── tools.py                  # @tool definitions: time, shell, files, knowledge base, bridge
+│   ├── kb_refine.py              # 26b draft refinement pipeline (async + sync)
 │   └── run.py                    # CLI entry point with streaming and memory commands
 ├── bridge/
 │   ├── api.py                    # FastAPI app -- knowledge CRUD, CLAUDE.md generation, chat
 │   ├── api_models.py             # Pydantic schemas
 │   ├── api_run.py                # Uvicorn entry point
 │   ├── chat.py                   # SSE text chat + WebSocket voice endpoints
-│   └── claude_md.py              # CLAUDE.md assembler -- scored, budget-aware
+│   ├── claude_md.py              # CLAUDE.md assembler -- scored, budget-aware
+│   └── models.py                 # Model lifecycle -- VRAM management, swap for KB
 ├── knowledge/
-│   └── knowledge_store.py        # Markdown KB: list, read, save, search, tag filter
+│   ├── knowledge_store.py        # Markdown KB: list, read, save, search, tag filter
+│   ├── kb_index.py               # ChromaDB semantic search, LLM summaries, mtime sync
+│   ├── chunker.py                # Section-based markdown chunking (H2/H3/H4)
+│   └── tokenizer.py              # Token counting via tiktoken cl100k_base
 ├── memory/
 │   ├── vector_store.py           # ChromaDB wrapper
 │   ├── tagger.py                 # LLM-based category/subcategory tagging + novelty check
@@ -206,9 +216,14 @@ agent-zero/
 ├── tests/
 │   ├── test_api.py               # Knowledge CRUD, auth, privacy, CLAUDE.md routes (28 tests)
 │   ├── test_chat_api.py          # SSE auth, WebSocket auth, static serving (10 tests)
+│   ├── test_chunker.py           # Section-based markdown chunking (12 tests)
 │   ├── test_claude_md.py         # Bridge scoring, budget, path resolution (18 tests)
+│   ├── test_kb_index.py          # Semantic search, sync, index/remove (14 tests)
+│   ├── test_kb_refine.py         # Draft refinement pipeline, swap verification (9 tests)
 │   ├── test_knowledge_store.py   # KB file ops, frontmatter, search, index, log (41 tests)
 │   ├── test_memory_manager.py    # Memory pipeline, dedup, contradiction, pruning (23 tests)
+│   ├── test_models.py            # Model lifecycle, ensure/unload/swap (10 tests)
+│   ├── test_tokenizer.py         # Token counting and truncation (8 tests)
 │   └── test_voice.py             # VAD, wake word, TTS, echo suppression (14 tests)
 ├── optimization/                 # Phase 4 -- DSPy GEPA prompt evolution (planned)
 ├── fine_tuning/                  # Phase 5 -- MLX LoRA fine-tuning (planned)
@@ -305,12 +320,20 @@ CLI thread commands: `new` (start fresh thread), `quit`
 | 2a: Memory | done | ChromaDB, tagging, dedup, contradiction, novelty, pruning |
 | KB: Knowledge base | done | Obsidian markdown, tag filtering, auto index/log |
 | 3a: CLAUDE.md bridge | done | Project-tagged KB → CLAUDE.md, scored + budget-aware |
-| 3b: HTTP API | done | FastAPI, auth, privacy filtering, CRUD, 150 tests passing |
+| 3b: HTTP API | done | FastAPI, auth, privacy filtering, CRUD |
 | 6: Voice + Web UI | done | Whisper STT, macOS TTS, VAD, SSE chat, WebSocket voice |
-| 2b: Memory (txtai) | planned | Graph relationships + semantic SQL if ChromaDB proves insufficient |
-| 4: Self-improvement | planned | DSPy GEPA prompt evolution |
-| 7: Web tools | planned | Crawl4AI, calendar, clipboard |
-| 5: Fine-tuning | planned | MLX LoRA on interaction data |
+| KB context engineering | done | Semantic search, LLM summaries, token-aware reads, section chunking, 64K context |
+| Model orchestration | done | Three-model lifecycle, on-demand 26b, draft/refine pipeline, 206 tests passing |
+
+---
+
+## Next steps
+
+**Eval framework / agent lightning** -- systematic evaluation of agent responses. Measure quality, track regressions, benchmark prompt changes. Possibly DSPy GEPA for automated prompt evolution.
+
+**Self-learning and fine-tuning** -- continuous improvement from interaction data. MLX LoRA fine-tuning on accumulated conversation logs. The agent gets better the more you use it.
+
+**Web research** -- the agent launches sub-agents to browse and scrape the web, pulling discovered material into the knowledge base. Looking at local-first options that do not require API keys -- Firecrawl (self-hosted), Crawl4AI, or similar headless browser scraping. The flow: agent identifies a research need, spawns a scraper, ingests results as KB files, indexes them for future retrieval.
 
 
 ---
@@ -340,6 +363,18 @@ Ollama runs as a macOS launch agent. Environment variables set with `export` in 
 **Why full regeneration on CLAUDE.md updates**
 
 Merging or diffing against an existing CLAUDE.md would require parsing it back into structure and reconciling with the source knowledge files. Full regeneration is simpler, deterministic, and the file is explicitly marked as auto-generated -- manual edits are not preserved by design.
+
+**Why two-phase KB retrieval with LLM summaries**
+
+Naive retrieval dumps full file content into the context window. A 25K-token knowledge file in a 65K-token context leaves almost nothing for the actual conversation. The solution is two phases: discovery, then targeted loading.
+
+At index time, the fast model (E2B) generates a 1-2 sentence summary of each section chunk. These summaries are stored in ChromaDB alongside the full content. At query time, the system works in layers:
+
+1. *Passive awareness* -- every user message triggers a semantic search against the KB index. The top 3 chunk summaries are injected into the system prompt automatically. The agent knows what is available without loading anything.
+2. *Active discovery* -- the agent calls `search_knowledge`, which returns filenames, section headings, and summaries across the entire KB. Still no full content in the context.
+3. *Targeted loading* -- the agent calls `read_knowledge` to load a specific file. If the file exceeds the context budget (40% of `NUM_CTX`, roughly 26K tokens at the default 65K), it gets a section index instead -- headings with token counts. It then calls `read_knowledge_section` to load only the section it needs.
+
+The result is that the agent can navigate a knowledge base much larger than its context window. It sees summaries of everything, loads full content only for what it needs, and never blows the budget on a single file. The LLM-generated summaries are the key -- they give semantic search something meaningful to match against, rather than relying on raw chunk text which may not contain the keywords a user would search for.
 
 **Why ChromaDB**
 
@@ -389,6 +424,29 @@ Set `ws.binaryType = 'arraybuffer'` before TTS audio arrives (already set in `ap
 
 ---
 
+## Tests
+
+206 tests, all passing. The suite runs in under 8 seconds with no network calls, no running Ollama instance, and no GPU required -- every external dependency (Ollama, ChromaDB production data, LLM inference) is mocked or replaced with ephemeral fixtures.
+
+Coverage spans the full stack:
+
+- **API layer** -- authentication (bearer token, timing-safe comparison), authorization (privacy filtering, path traversal rejection), all CRUD routes, CLAUDE.md generation and write workflows, SSE chat streaming, WebSocket voice auth handshake, static file serving.
+- **Knowledge base** -- file operations (save, read, list, search), frontmatter parsing, tag filtering, filename sanitization, subdirectory handling, auto-generated index and audit log. Semantic search via ChromaDB with ephemeral collections per test. Section-based markdown chunking (H2/H3/H4 detection, recursive splitting, hard-split with token overlap). Token counting and truncation.
+- **Memory pipeline** -- noise filtering, LLM-based tagging, deduplication (cosine distance threshold), contradiction detection and replacement, novelty checking, TTL pruning, max memory cap enforcement.
+- **Model lifecycle** -- ensure/unload/swap functions for both async and sync contexts, VRAM swap sequencing for KB refinement, `keep_alive=0` unload calls.
+- **KB refinement pipeline** -- draft/refine flow with mocked ChatOllama, swap-to-26b and swap-back verification, fallback behavior on empty responses and LLM errors, save and re-index after refinement.
+- **CLAUDE.md bridge** -- recency decay scoring, canon bonus, budget-aware file selection, path resolution (absolute vs. relative), truncation handling.
+- **Voice** -- VAD state machine (silence, speaking, trailing silence, max duration), wake word detection (substring matching, case insensitivity, punctuation handling), TTS sentence splitting, echo suppression during playback, PCM conversion roundtrip.
+
+Tests are isolated by design -- each test file sets up its own fixtures (temp directories, monkeypatched module state, ephemeral ChromaDB clients) so they can run in any order with no shared state.
+
+```bash
+./venv-agent-zero/bin/python -m pytest tests/ -v
+```
+
+
+---
+
 ## Stack
 
 | Layer | Package | License |
@@ -414,7 +472,7 @@ Everything here is open source with permissive licenses. No commercial dependenc
 
 ## Acknowledgments
 
-Index and log patterns from Andrej Karpathy's LLM Wiki. ChromaDB organization approach from MemPalace by Milla Jovovich.
+Index and log patterns are inspired by Andrej Karpathy's LLM Wiki. ChromaDB organization approach is inspired by MemPalace by Milla Jovovich. Obsidian UI is inspired by "Building a Second Brain" by Tiago Forte.
 
 
 ---

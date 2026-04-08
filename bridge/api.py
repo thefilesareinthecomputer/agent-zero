@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent.config import API_TOKEN, FAST_TEXT_MODEL, KNOWLEDGE_CANON_PATH, MAIN_MODEL, NUM_CTX, VOICE_MODEL, UI_DIR, PROJECT_OUTPUTS_PATH
+from agent.config import API_TOKEN, CHAT_MODEL, KNOWLEDGE_CANON_PATH, NUM_CTX, VOICE_MODEL, UI_DIR, PROJECT_OUTPUTS_PATH
 from bridge.api_models import (
     ClaudeMdGenerateRequest,
     ClaudeMdGenerateResponse,
@@ -52,14 +52,13 @@ async def lifespan(app: FastAPI):
     if len(API_TOKEN) < 32:
         raise RuntimeError("API_TOKEN must be at least 32 characters")
 
-    # Init agents (text + voice) with async checkpointer
+    # Init agents (chat + voice) with async checkpointer
     from agent.agent import create_async_agent
     from bridge.chat import init_agents, set_voice_ready
 
-    text_agent, checkpointer = await create_async_agent(model=MAIN_MODEL)
-    fast_agent, _ = await create_async_agent(model=FAST_TEXT_MODEL)
+    chat_agent, checkpointer = await create_async_agent(model=CHAT_MODEL)
     voice_agent, _ = await create_async_agent(model=VOICE_MODEL)
-    init_agents(text_agent, fast_agent, voice_agent, checkpointer)
+    init_agents(chat_agent, voice_agent, checkpointer)
 
     # Preload and warm Whisper-MLX (in thread -- GPU-bound)
     try:

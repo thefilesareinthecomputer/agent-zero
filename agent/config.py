@@ -35,6 +35,11 @@ KB_FILE_MAX_RATIO: float = float(os.getenv("KB_FILE_MAX_RATIO", "0.4"))
 KB_FILE_MAX_TOKENS: int = int(os.getenv("KB_FILE_MAX_TOKENS", str(int(NUM_CTX * KB_FILE_MAX_RATIO))))
 FAST_TEXT_MODEL: str = os.getenv("FAST_TEXT_MODEL", "gemma4:e4b")
 
+# Semantic model role aliases
+CHAT_MODEL: str = FAST_TEXT_MODEL      # e4b -- day-to-day interaction
+KB_REFINE_MODEL: str = MAIN_MODEL      # 26b -- KB file editing
+TAGGER_MODEL: str = FAST_MODEL         # e2b -- classification, summaries
+
 # API
 API_TOKEN: str = os.getenv("API_TOKEN", "")
 API_PORT: int = int(os.getenv("API_PORT", "8900"))

@@ -1,11 +1,12 @@
 """Agent Zero CLI -- interactive loop with streaming responses and memory."""
 
+import sys
 import uuid
 
 from pathlib import Path
 
 from agent.agent import create_agent
-from agent.config import KNOWLEDGE_CANON_PATH
+from agent.config import CHAT_MODEL, KB_REFINE_MODEL, KNOWLEDGE_CANON_PATH
 from knowledge.knowledge_store import list_files as kb_list_files
 
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
@@ -90,9 +91,12 @@ def _handle_command(user_input: str) -> bool:
 
 def run_cli() -> None:
     print_banner()
-    print("Loading agent...")
 
-    agent, checkpointer = create_agent()
+    use_heavy = "--heavy" in sys.argv
+    model = KB_REFINE_MODEL if use_heavy else CHAT_MODEL
+    print(f"Loading agent ({model})...")
+
+    agent, checkpointer = create_agent(model=model)
 
     # Prune stale memories on startup
     pruned = prune()
@@ -102,7 +106,8 @@ def run_cli() -> None:
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    print(f"Ready. Thread: {thread_id[:8]} | Memories: {memory_count()}")
+    label = "26B" if use_heavy else "4B"
+    print(f"Ready ({label}). Thread: {thread_id[:8]} | Memories: {memory_count()}")
     print("-" * 40)
 
     try:

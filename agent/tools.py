@@ -269,6 +269,50 @@ def save_knowledge(filename: str, content: str, tags: str, project: str = "") ->
         return f"Error saving knowledge file: {e}"
 
 
+@tool
+async def draft_knowledge(
+    filename: str,
+    draft_content: str,
+    tags: str,
+    instructions: str,
+    project: str = "",
+) -> str:
+    """Draft a knowledge base file for refinement by the heavy model (26B).
+    Write your rough draft as draft_content with ## section headings, and put
+    your recommended improvements in instructions. The heavy model will refine
+    the draft and save the final version. Use this instead of save_knowledge
+    when the content would benefit from deeper analysis and restructuring.
+    Tags are comma-separated simple words. Cannot overwrite canon files."""
+    if _is_canon_file(filename):
+        return f"Cannot save: {filename} is a canon file (read-only)."
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    try:
+        import asyncio
+        try:
+            asyncio.get_running_loop()
+            is_async = True
+        except RuntimeError:
+            is_async = False
+
+        if is_async:
+            from agent.kb_refine import refine_kb_draft
+            result = await refine_kb_draft(
+                filename, draft_content, instructions, tag_list,
+                project=project or None,
+            )
+        else:
+            from agent.kb_refine import refine_kb_draft_sync
+            result = refine_kb_draft_sync(
+                filename, draft_content, instructions, tag_list,
+                project=project or None,
+            )
+        return result
+    except Exception as e:
+        return f"Error drafting knowledge file: {e}"
+
+
 # -- CLAUDE.md bridge tools --
 
 

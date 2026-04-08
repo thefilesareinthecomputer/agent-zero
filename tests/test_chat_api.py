@@ -84,7 +84,7 @@ class TestChatSSE:
     def test_chat_returns_sse_stream(self, client):
         # No lock mock needed -- the real asyncio.Lock starts unlocked
         mock_agent_instance = _make_mock_agent()
-        with patch("bridge.chat._text_agent", mock_agent_instance):
+        with patch("bridge.chat._chat_agent", mock_agent_instance):
             resp = client.post(
                 "/chat",
                 json={"message": "hello"},
@@ -93,10 +93,10 @@ class TestChatSSE:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.headers.get("content-type", "")
 
-    @patch("bridge.chat._text_agent")
+    @patch("bridge.chat._chat_agent")
     def test_chat_session_id_returned(self, mock_agent, client):
         mock_agent_instance = _make_mock_agent()
-        with patch("bridge.chat._text_agent", mock_agent_instance):
+        with patch("bridge.chat._chat_agent", mock_agent_instance):
             resp = client.post(
                 "/chat",
                 json={"message": "hello"},

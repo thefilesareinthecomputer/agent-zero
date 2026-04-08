@@ -261,6 +261,15 @@ def sync_kb_index() -> dict[str, int]:
                 count = remove_file(filename, source)
                 removed += count
 
+    # Unload e2b after batch indexing to free VRAM
+    if indexed > 0:
+        try:
+            from bridge.models import sync_unload_model
+            from agent.config import TAGGER_MODEL
+            sync_unload_model(TAGGER_MODEL)
+        except Exception:
+            pass
+
     result = {"indexed": indexed, "removed": removed}
     log.info("KB index sync: %s", result)
     return result
