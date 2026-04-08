@@ -13,7 +13,7 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 - **Text chat** via browser (SSE streaming) or terminal CLI
 - **Voice chat** via WebSocket -- wake word detection, Whisper STT, macOS TTS
 - **Long-term memory** -- every conversation is embedded in ChromaDB with smart deduplication, contradiction detection, and LLM-based novelty filtering
-- **Knowledge base** -- Obsidian-compatible markdown files the agent owns and manages, with semantic search (ChromaDB vectors + LLM-generated summaries), token-aware retrieval, and section-based chunking
+- **Knowledge base** -- Obsidian-compatible markdown files the agent owns and manages, with semantic search, heading trees (H1-H5 with subtree token counts), and three-step retrieval (search summaries -> browse tree -> load sections)
 - **Multi-model orchestration** -- e4b handles chat, e2b handles tagging, 26b loads on-demand for KB file creation (draft/refine pipeline) or manual toggle, then unloads immediately
 - **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
 - **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
@@ -191,7 +191,7 @@ agent-zero/
 ├── knowledge/
 │   ├── knowledge_store.py        # Markdown KB: list, read, save, search, tag filter
 │   ├── kb_index.py               # ChromaDB semantic search, LLM summaries, mtime sync
-│   ├── chunker.py                # Section-based markdown chunking (H2/H3/H4)
+│   ├── chunker.py                # Section-based markdown chunking (H1-H5), heading tree
 │   └── tokenizer.py              # Token counting via tiktoken cl100k_base
 ├── memory/
 │   ├── vector_store.py           # ChromaDB wrapper
@@ -216,7 +216,7 @@ agent-zero/
 ├── tests/
 │   ├── test_api.py               # Knowledge CRUD, auth, privacy, CLAUDE.md routes (28 tests)
 │   ├── test_chat_api.py          # SSE auth, WebSocket auth, static serving (10 tests)
-│   ├── test_chunker.py           # Section-based markdown chunking (12 tests)
+│   ├── test_chunker.py           # Section-based markdown chunking, heading tree (27 tests)
 │   ├── test_claude_md.py         # Bridge scoring, budget, path resolution (18 tests)
 │   ├── test_kb_index.py          # Semantic search, sync, index/remove (14 tests)
 │   ├── test_kb_refine.py         # Draft refinement pipeline, swap verification (9 tests)
@@ -323,7 +323,7 @@ CLI thread commands: `new` (start fresh thread), `quit`
 | 3b: HTTP API | done | FastAPI, auth, privacy filtering, CRUD |
 | 6: Voice + Web UI | done | Whisper STT, macOS TTS, VAD, SSE chat, WebSocket voice |
 | KB context engineering | done | Semantic search, LLM summaries, token-aware reads, section chunking, 64K context |
-| Model orchestration | done | Three-model lifecycle, on-demand 26b, draft/refine pipeline, 206 tests passing |
+| Model orchestration | done | Three-model lifecycle, on-demand 26b, draft/refine pipeline, 221 tests passing |
 
 ---
 
@@ -364,17 +364,35 @@ Ollama runs as a macOS launch agent. Environment variables set with `export` in 
 
 Merging or diffing against an existing CLAUDE.md would require parsing it back into structure and reconciling with the source knowledge files. Full regeneration is simpler, deterministic, and the file is explicitly marked as auto-generated -- manual edits are not preserved by design.
 
-**Why two-phase KB retrieval with LLM summaries**
+**Why three-step KB retrieval -- never auto-load content**
 
-Naive retrieval dumps full file content into the context window. A 25K-token knowledge file in a 65K-token context leaves almost nothing for the actual conversation. The solution is two phases: discovery, then targeted loading.
+Naive retrieval dumps full file content into the context window. Even a medium-sized file (30-40% of context) seems fine in isolation, but three of them back-to-back leaves no room for the model to generate a response. The fundamental problem: the agent needs to control exactly how many tokens it consumes, every time, with full visibility into the cost.
 
-At index time, the fast model (E2B) generates a 1-2 sentence summary of each section chunk. These summaries are stored in ChromaDB alongside the full content. At query time, the system works in layers:
+The solution is three steps where content never loads automatically:
 
-1. *Passive awareness* -- every user message triggers a semantic search against the KB index. The top 3 chunk summaries are injected into the system prompt automatically. The agent knows what is available without loading anything.
-2. *Active discovery* -- the agent calls `search_knowledge`, which returns filenames, section headings, and summaries across the entire KB. Still no full content in the context.
-3. *Targeted loading* -- the agent calls `read_knowledge` to load a specific file. If the file exceeds the context budget (40% of `NUM_CTX`, roughly 26K tokens at the default 65K), it gets a section index instead -- headings with token counts. It then calls `read_knowledge_section` to load only the section it needs.
+1. *Passive awareness* -- every user message triggers a semantic search against the KB index. The top 3 chunk summaries (generated by E2B at index time) are injected into the system prompt. The agent knows what exists without loading anything. Cost: ~100 tokens.
+2. *Active discovery* -- the agent calls `search_knowledge`, which returns filenames, section headings, and summaries. Or calls `read_knowledge`, which returns a heading tree -- the full H1-H5 hierarchy with cumulative token counts per subtree. Neither loads any content. The agent can see that "## Star Schema" costs 6,200 tokens total but its child "### Fact Tables" is only 2,500. Cost: the tree itself, ~50-200 tokens.
+3. *Selective loading* -- the agent calls `read_knowledge_section` to load exactly the sections it chose from the tree. Each load is a deliberate decision -- the agent checks the section's token cost against remaining budget before every call.
 
-The result is that the agent can navigate a knowledge base much larger than its context window. It sees summaries of everything, loads full content only for what it needs, and never blows the budget on a single file. The LLM-generated summaries are the key -- they give semantic search something meaningful to match against, rather than relying on raw chunk text which may not contain the keywords a user would search for.
+A live context budget line is injected into the system prompt on every turn:
+
+```
+[Context budget: 12,400 / 65,536 tokens used (18%) | 51,088 tokens available | reserve 2,048 for response]
+```
+
+The system prompt tells the agent: below 10,000 available, load only the single most relevant section. Below 5,000, stop loading entirely and work with what you have.
+
+The result: the agent can navigate a knowledge base much larger than its context window, work across multiple files in a single conversation, and never accidentally crowd out its own ability to respond. Every token consumed from the KB is a choice, not an accident.
+
+**Why heading trees instead of flat section lists**
+
+An early version returned a flat numbered list of sections with token counts when a file exceeded the context budget. This worked for single files but gave the agent no structural information -- it could not tell which sections were children of which, or what the cumulative cost of a topic branch was. Worse, files under the budget limit auto-loaded their full content, so the agent had no way to be selective with medium-sized files.
+
+The heading tree (H1-H5, `HeadingNode` dataclass with `subtree_tokens` rolled up from leaves) solves both problems. The agent sees the hierarchy and cumulative costs at every level. `read_knowledge` always returns the tree, never content -- even for small files. The agent shops from the tree and loads sections one at a time via `read_knowledge_section`. This makes context consumption fully deliberate regardless of file size.
+
+**Why live context budget tracking**
+
+The agent has a 65K token context window shared between the system prompt, conversation history, tool results, and its own response. Without visibility into how much is used, there is no way to make informed loading decisions. A budget line is injected into the system prompt on every turn with tokens used, tokens available, and generation reserve. The system prompt includes hard thresholds (10K: be selective, 5K: stop loading) so the agent degrades gracefully instead of running out of room to respond.
 
 **Why ChromaDB**
 
@@ -426,12 +444,12 @@ Set `ws.binaryType = 'arraybuffer'` before TTS audio arrives (already set in `ap
 
 ## Tests
 
-206 tests, all passing. The suite runs in under 8 seconds with no network calls, no running Ollama instance, and no GPU required -- every external dependency (Ollama, ChromaDB production data, LLM inference) is mocked or replaced with ephemeral fixtures.
+221 tests, all passing. The suite runs in under 8 seconds with no network calls, no running Ollama instance, and no GPU required -- every external dependency (Ollama, ChromaDB production data, LLM inference) is mocked or replaced with ephemeral fixtures.
 
 Coverage spans the full stack:
 
 - **API layer** -- authentication (bearer token, timing-safe comparison), authorization (privacy filtering, path traversal rejection), all CRUD routes, CLAUDE.md generation and write workflows, SSE chat streaming, WebSocket voice auth handshake, static file serving.
-- **Knowledge base** -- file operations (save, read, list, search), frontmatter parsing, tag filtering, filename sanitization, subdirectory handling, auto-generated index and audit log. Semantic search via ChromaDB with ephemeral collections per test. Section-based markdown chunking (H2/H3/H4 detection, recursive splitting, hard-split with token overlap). Token counting and truncation.
+- **Knowledge base** -- file operations (save, read, list, search), frontmatter parsing, tag filtering, filename sanitization, subdirectory handling, auto-generated index and audit log. Semantic search via ChromaDB with ephemeral collections per test. Section-based markdown chunking (H1-H5 detection, recursive splitting, hard-split with token overlap). Heading tree construction with subtree token rollup, tree formatting, deep nesting (H1 through H5), sibling vs. parent-child level handling. Token counting and truncation.
 - **Memory pipeline** -- noise filtering, LLM-based tagging, deduplication (cosine distance threshold), contradiction detection and replacement, novelty checking, TTL pruning, max memory cap enforcement.
 - **Model lifecycle** -- ensure/unload/swap functions for both async and sync contexts, VRAM swap sequencing for KB refinement, `keep_alive=0` unload calls.
 - **KB refinement pipeline** -- draft/refine flow with mocked ChatOllama, swap-to-26b and swap-back verification, fallback behavior on empty responses and LLM errors, save and re-index after refinement.

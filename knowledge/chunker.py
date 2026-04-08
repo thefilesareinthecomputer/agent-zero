@@ -1,24 +1,39 @@
 """Section-based chunking for knowledge base files.
 
 Splits markdown files on heading boundaries for indexing and token-aware
-retrieval. Detects the highest heading level present and splits on that.
-Handles recursive splitting for oversized sections and hard splits when
-no sub-headings exist.
+retrieval. Detects the highest heading level present (H1-H5) and splits
+on that. Handles recursive splitting for oversized sections and hard
+splits when no sub-headings exist.
+
+Also provides heading tree construction -- a hierarchical view of all
+headings with cumulative token counts per subtree. Used by read_knowledge
+to give the agent a structural map of oversized files.
 """
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from knowledge.knowledge_store import _parse_frontmatter
 from knowledge.tokenizer import count_tokens, truncate_to_tokens
 
 
+@dataclass
+class HeadingNode:
+    """A node in the heading tree. Represents one markdown heading."""
+    level: int                                  # 1-5 (or 0 for root)
+    heading: str                                # heading text without # prefix
+    own_tokens: int = 0                         # tokens in this node's direct content
+    subtree_tokens: int = 0                     # own_tokens + all children's subtree_tokens
+    children: list["HeadingNode"] = field(default_factory=list)
+
+
 def _detect_heading_level(body: str) -> int | None:
     """Find the highest (lowest number) heading level in the body.
 
-    Scans for ## (2), ### (3), #### (4). Returns None if no headings found.
+    Scans for H1 through H5. Returns None if no headings found.
     """
-    for level in (2, 3, 4):
+    for level in range(1, 6):
         pattern = rf"^{'#' * level}\s+\S"
         if re.search(pattern, body, re.MULTILINE):
             return level
@@ -76,6 +91,121 @@ def _hard_split(text: str, max_tokens: int, overlap: int = 50) -> list[str]:
         chunks.append(enc.decode(tokens[start:end]))
         start = end - overlap if end < len(tokens) else end
     return chunks
+
+
+def build_heading_tree(text: str, filename: str) -> HeadingNode:
+    """Build a hierarchical heading tree from a markdown file.
+
+    Parses all H1-H5 headings and organizes them into a tree where each
+    node's subtree_tokens includes its own content plus all descendants.
+    The root node (level 0) represents the file itself.
+
+    Args:
+        text: Raw file content (including frontmatter).
+        filename: Used as the root node heading.
+
+    Returns:
+        HeadingNode tree with computed subtree_tokens at every level.
+    """
+    _, body = _parse_frontmatter(text)
+    body = body.strip()
+
+    root = HeadingNode(level=0, heading=Path(filename).stem)
+
+    if not body:
+        return root
+
+    # Parse all headings and their content spans
+    heading_pattern = re.compile(r"^(#{1,5})\s+(.+)$", re.MULTILINE)
+    entries: list[tuple[int, str, str]] = []  # (level, heading, content)
+
+    matches = list(heading_pattern.finditer(body))
+
+    if not matches:
+        # No headings -- all content belongs to root
+        root.own_tokens = count_tokens(body)
+        root.subtree_tokens = root.own_tokens
+        return root
+
+    # Content before first heading = root's own content
+    preamble = body[:matches[0].start()].strip()
+    if preamble:
+        root.own_tokens = count_tokens(preamble)
+
+    for i, match in enumerate(matches):
+        level = len(match.group(1))
+        heading = match.group(2).strip()
+        content_start = match.end()
+        content_end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        content = body[content_start:content_end].strip()
+        # Strip trailing dividers
+        if content.endswith("---"):
+            content = content[:-3].rstrip()
+        entries.append((level, heading, content))
+
+    # Build tree using a stack-based approach
+    stack: list[HeadingNode] = [root]
+
+    for level, heading, content in entries:
+        node = HeadingNode(
+            level=level,
+            heading=heading,
+            own_tokens=count_tokens(content) if content else 0,
+        )
+        # Pop stack until we find a parent with a lower level
+        while len(stack) > 1 and stack[-1].level >= level:
+            stack.pop()
+        stack[-1].children.append(node)
+        stack.append(node)
+
+    # Compute subtree_tokens bottom-up
+    _compute_subtree_tokens(root)
+
+    return root
+
+
+def _compute_subtree_tokens(node: HeadingNode) -> int:
+    """Recursively compute subtree_tokens for a node and all descendants."""
+    child_total = sum(_compute_subtree_tokens(c) for c in node.children)
+    node.subtree_tokens = node.own_tokens + child_total
+    return node.subtree_tokens
+
+
+def format_heading_tree(root: HeadingNode, indent: int = 0) -> str:
+    """Render a heading tree as indented text for LLM consumption.
+
+    Output looks like:
+        dim-modeling-guide (2,450 tokens)
+          ## Overview (320 tokens)
+          ## Star Schema (1,200 tokens)
+            ### Fact Tables (500 tokens)
+            ### Dimension Tables (700 tokens)
+          ## Snowflake Schema (930 tokens)
+    """
+    lines: list[str] = []
+    prefix = "  " * indent
+
+    if root.level == 0:
+        # Root node -- show filename
+        lines.append(f"{root.heading} ({root.subtree_tokens:,} tokens)")
+        for child in root.children:
+            lines.append(format_heading_tree(child, indent + 1))
+    else:
+        hashes = "#" * root.level
+        if root.children:
+            lines.append(
+                f"{prefix}{hashes} {root.heading} "
+                f"({root.subtree_tokens:,} tokens)"
+            )
+            for child in root.children:
+                lines.append(format_heading_tree(child, indent + 1))
+        else:
+            lines.append(
+                f"{prefix}{hashes} {root.heading} "
+                f"({root.own_tokens:,} tokens)"
+            )
+
+    return "\n".join(lines)
 
 
 def _chunk_sections(

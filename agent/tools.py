@@ -75,7 +75,11 @@ from knowledge.knowledge_store import (
     save_file as _kb_save,
     search_files as _kb_search,
 )
-from knowledge.chunker import chunk_file as _chunk_file
+from knowledge.chunker import (
+    build_heading_tree as _build_heading_tree,
+    chunk_file as _chunk_file,
+    format_heading_tree as _format_heading_tree,
+)
 from knowledge.tokenizer import count_tokens as _count_tokens, truncate_to_tokens as _truncate
 from knowledge.kb_index import search_kb as _search_kb, index_file as _index_file
 from bridge.claude_md import write_claude_md as _write_claude_md
@@ -126,10 +130,11 @@ def list_knowledge() -> str:
 
 @tool
 def read_knowledge(filename: str) -> str:
-    """Read a knowledge base file by name. Returns the section content.
-    Searches both editable and canon files. For large files that exceed
-    the context budget, returns a section index instead -- use
-    read_knowledge_section to load a specific section."""
+    """Returns the heading tree for a knowledge file -- H1-H5 structure
+    with token counts per subtree. Never loads full content. Use
+    read_knowledge_section to load the specific sections you need.
+    This lets you shop for content and control exactly how many tokens
+    you consume."""
     # Try knowledge/ first, then canon/
     content = _kb_read(filename)
     source = "knowledge"
@@ -141,42 +146,44 @@ def read_knowledge(filename: str) -> str:
     if not content:
         return "(file exists but has no section content)"
 
-    # Token awareness: if file exceeds budget, return section index
     tok_count = _count_tokens(content)
-    if tok_count > KB_FILE_MAX_TOKENS:
-        _kb_dir = Path(KNOWLEDGE_PATH)
-        file_path = _CANON_DIR / filename if source == "canon" else _kb_dir / filename
-        try:
-            raw = file_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            raw = ""
-        chunks = _chunk_file(raw, filename) if raw else []
 
+    # Build heading tree
+    _kb_dir = Path(KNOWLEDGE_PATH)
+    file_path = _CANON_DIR / filename if source == "canon" else _kb_dir / filename
+    try:
+        raw = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raw = ""
+
+    tree = _build_heading_tree(raw, filename) if raw else None
+    tree_text = _format_heading_tree(tree) if tree else None
+
+    if tree_text:
         lines = [
-            f"File exceeds context budget ({tok_count} tokens, "
-            f"limit {KB_FILE_MAX_TOKENS}).",
-            "Available sections:",
+            f"[{tok_count:,} tokens total]",
+            "",
+            tree_text,
+            "",
+            "Use read_knowledge_section(filename, section_heading) "
+            "to load the sections you need.",
         ]
-        for i, chunk in enumerate(chunks, 1):
-            lines.append(
-                f"  {i}. {chunk['heading']} ({chunk['token_count']} tokens)"
-            )
-        lines.append("")
-        lines.append(
-            'Use read_knowledge_section(filename, section_heading) '
-            'to read a specific section.'
-        )
         return "\n".join(lines)
 
-    return content
+    # No headings -- single-section file, report size
+    stem = Path(filename).stem
+    return (
+        f"[{tok_count:,} tokens, no headings]\n"
+        f"Use read_knowledge_section(\"{filename}\", \"{stem}\") to load."
+    )
 
 
 @tool
 def read_knowledge_section(filename: str, section: str) -> str:
-    """Read a specific section from a knowledge base file. Use this when
-    read_knowledge reports a file exceeds the context budget. The section
-    parameter should match a heading from the section index (case-insensitive
-    partial match)."""
+    """Load a specific section from a knowledge base file. Use after
+    read_knowledge to load the sections you chose from the heading tree.
+    The section parameter should match a heading from the tree
+    (case-insensitive partial match)."""
     # Find the file
     _kb_dir = Path(KNOWLEDGE_PATH)
     path = _kb_dir / filename

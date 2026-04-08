@@ -11,6 +11,7 @@ from langgraph.prebuilt import create_react_agent
 from agent.config import (
     AGENT_DB_PATH, MAIN_MODEL, NUM_CTX, NUM_PREDICT, OLLAMA_BASE_URL,
 )
+from knowledge.tokenizer import count_tokens as _count_tokens
 from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
     draft_knowledge, list_knowledge, read_knowledge,
@@ -43,13 +44,17 @@ SYSTEM_PROMPT = (
     "relevant. You do not manage this.\n"
     "- Knowledge base: a folder of markdown files you own and manage. Use "
     "search_knowledge to find files by topic (returns summaries, not full "
-    "content). Use read_knowledge to load full content when you need to "
-    "work with a file. For large files, read_knowledge returns a section "
-    "index -- use read_knowledge_section for a specific section. Before "
-    "creating a new file, search to see if the topic is already covered. "
-    "To edit an existing file, read it first, then save the full updated "
-    "content. Prefer updating existing files over creating new ones for "
-    "the same topic.\n\n"
+    "content). Use read_knowledge to get a file's heading tree -- the "
+    "H1-H5 structure with token counts per subtree. This never loads "
+    "content, only structure. Then use read_knowledge_section to load "
+    "the specific sections you need. Every section load is a deliberate "
+    "choice -- check the token cost in the tree against your remaining "
+    "budget before loading. When working across multiple files, shop "
+    "from the trees and load only what you need. Before creating a new "
+    "file, search to see if the topic is already covered. To edit an "
+    "existing file, read its tree, load the sections you need, then "
+    "save the full updated content. Prefer updating existing files over "
+    "creating new ones for the same topic.\n\n"
     "When creating or significantly editing a knowledge file, use "
     "draft_knowledge to have the heavy model (26B) refine your work. "
     "Write a rough draft and instructions for improvement. The heavy "
@@ -68,6 +73,16 @@ SYSTEM_PROMPT = (
     "Some knowledge files are marked [canon] -- read-only reference files "
     "maintained by the user. You cannot edit or delete them. Treat canon "
     "content as authoritative.\n\n"
+    "CONTEXT BUDGET: A budget line is injected at the end of this prompt "
+    "on every turn showing tokens used, tokens available, and generation "
+    "reserve. This is your fuel gauge. The three-step retrieval flow "
+    "(search -> read tree -> load sections) exists so you control exactly "
+    "how many tokens you burn. Before every read_knowledge_section call, "
+    "check the section's token cost in the heading tree against your "
+    "remaining budget. When available tokens drop below 10,000, be "
+    "selective -- load only the single most relevant section. When below "
+    "5,000, stop loading new content entirely and work with what you "
+    "have.\n\n"
     "You have tools for: checking time, running shell commands, "
     "reading/writing files, managing knowledge, and updating project "
     "context. Use them when they help. No preamble. No summaries of what "
@@ -120,7 +135,23 @@ def _build_prompt(state: dict) -> list:
         except Exception:
             pass  # KB index not available -- skip injection
 
-    return [SystemMessage(content=system_content)] + list(messages)
+    # Compute context budget status so the agent can manage capacity.
+    # count_tokens already applies a 1.5x safety multiplier for Gemma4.
+    all_messages = [SystemMessage(content=system_content)] + list(messages)
+    used_tokens = sum(_count_tokens(m.content) for m in all_messages if hasattr(m, "content") and isinstance(m.content, str))
+    remaining = NUM_CTX - used_tokens
+    generation_reserve = NUM_PREDICT
+    available = max(0, remaining - generation_reserve)
+    pct_used = int((used_tokens / NUM_CTX) * 100)
+
+    budget_line = (
+        f"\n\n[Context budget: ~{used_tokens:,} / {NUM_CTX:,} tokens used "
+        f"({pct_used}%) | ~{available:,} available for tool results "
+        f"and generation | reserve {generation_reserve:,} for response]"
+    )
+    all_messages[0] = SystemMessage(content=system_content + budget_line)
+
+    return all_messages
 
 
 def create_agent(
