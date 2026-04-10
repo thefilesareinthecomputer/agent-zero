@@ -1,17 +1,17 @@
 # Agent Zero
 
-Save $ on AI and keep your knowledge base local.
-🤖agent-zero: a free, on-device LangGraph agent (Ollama + Gemma 4) with web UI, obsidian knowledge base read/write/RAG, and long-term conversation memory.
-🔌Designed to partner with CLAUDE Code - agent-zero assembles project context from your knowledge base into documentation and config files for Claude Code, saving on token / usage limits for project scaffolding
-👨🏻‍💻100% local - Agent Zero runs locally - no cloud, no subscriptions, no data leaving your machine
-💻Web UI - chatbot app with live context window tracking
-🗣️Voice chat - wake word detection, Whisper STT, macOS TTS - discuss a project idea with the agent while your hands are busy and turn rough ideas into clean documentation without touching your computer
-🔀Multi-model - 4B for chat, 26B for writing, 70B+ for reasoning, swap with a dropdown
-📚Three-step KB retrieval - semantic search, heading trees with token costs, the agent loads only what it needs and manages its context window with a live token budget
-📸Snapshot capture - say “snapshot” or “save that” to save the agent's last response as a knowledge base file
-🧠Multi-layered memory - deduplication, contradiction detection, LLM-based novelty filtering for recall
-📓Obsidian-compatible knowledge base the agent reads and writes, plus a sidecar read-only "canon" knowledge folder
-🔐REST API with bearer token auth
+#### Save $ on AI and keep your knowledge base local.
+- 🤖agent-zero: a free, on-device LangGraph agent (Ollama + Gemma 4) with web UI, obsidian knowledge base read/write/RAG, and long-term conversation memory.
+- 🔌Designed to partner with CLAUDE Code - agent-zero assembles project context from your knowledge base into documentation and config files for Claude Code, saving on token / usage limits for project scaffolding
+- 👨🏻‍💻100% local - Agent Zero runs locally - no cloud, no subscriptions, no data leaving your machine
+- 💻Web UI - chatbot app with live context window tracking
+- 🗣️Voice chat - wake word detection, Whisper STT, macOS TTS - discuss a project idea with the agent while your hands are busy and turn rough ideas into clean documentation without touching your computer
+- 🔀Multi-model - 4B for chat, 26B for writing, 70B+ for reasoning, swap with a dropdown
+- 📚Three-step KB retrieval - semantic search, heading trees with token costs, the agent loads only what it needs and manages its context window with a live token budget
+- 📸Snapshot capture - say “snapshot” or “save that” to save the agent's last response as a knowledge base file
+- 🧠Multi-layered memory - deduplication, contradiction detection, LLM-based novelty filtering for recall
+- 📓Obsidian-compatible knowledge base the agent reads and writes, plus a sidecar read-only "canon" knowledge folder
+- 🔐REST API with bearer token auth
 
 ![Agent Zero Web UI](static_assets/agent-zero-screenshot.png)
 
