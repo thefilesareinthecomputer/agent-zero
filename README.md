@@ -7,7 +7,8 @@ Save $ on AI and keep your knowledge base local.
 💻Web UI - chatbot app with live context window tracking
 🗣️Voice chat - wake word detection, Whisper STT, macOS TTS - discuss a project idea with the agent while your hands are busy and turn rough ideas into clean documentation without touching your computer
 🔀Multi-model - 4B for chat, 26B for writing, 70B+ for reasoning, swap with a dropdown
-📚Three-step KB retrieval - semantic search, document header trees with token costs per doc section, the agent loads only what it needs from the data catalog and manages its context window using a running “token budget” for its context window
+📚Three-step KB retrieval - semantic search, heading trees with token costs, the agent loads only what it needs and manages its context window with a live token budget
+📸Snapshot capture - say “snapshot” or “save that” to save the agent's last response as a knowledge base file
 🧠Multi-layered memory - deduplication, contradiction detection, LLM-based novelty filtering for recall
 📓Obsidian-compatible knowledge base the agent reads and writes, plus a sidecar read-only "canon" knowledge folder
 🔐REST API with bearer token auth
@@ -29,6 +30,8 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 - **Long-term memory** -- every conversation is embedded in ChromaDB (nomic-embed-text, 8192 token context) with smart deduplication, contradiction detection, LLM-based novelty filtering, compact summaries for low-cost injection, and soft decay (recency as tiebreaker, never a filter)
 - **Entity registry** -- SQLite-backed store of named entities (people, places, projects, concepts) automatically extracted from conversations via e2b, with alias dedup and mention tracking
 - **Knowledge base** -- Obsidian-compatible markdown files the agent owns and manages, with semantic search, heading trees (H1-H5 with subtree token counts), and three-step retrieval (search summaries -> browse tree -> load sections)
+- **Conditional system prompt** -- core prompt always present (~350 tokens); KB workflow rules and retrieval directives injected only when the knowledge base is relevant to the query. Conversational messages get ~65% smaller system prompts
+- **Snapshot capture** -- user says "snapshot" or "save that" and the agent's last response is saved as a KB file automatically. No content reproduction required -- the response is captured before the model runs
 - **Multi-model orchestration** -- e4b handles chat, e2b handles tagging, 26b loads on-demand for KB file creation (draft/refine pipeline) or manual toggle, then unloads immediately
 - **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
 - **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
@@ -191,9 +194,9 @@ agent-zero/
 ├── .python-version               # 3.12
 ├── requirements.txt              # Pinned deps (pip freeze)
 ├── agent/
-│   ├── agent.py                  # LangGraph ReAct agent, SQLite checkpointing, memory injection
+│   ├── agent.py                  # LangGraph ReAct agent, conditional prompt assembly, memory injection
 │   ├── config.py                 # .env-driven config
-│   ├── tools.py                  # @tool definitions: time, shell, files, knowledge base, bridge
+│   ├── tools.py                  # @tool definitions: time, shell, files, KB, snapshot, entities, bridge
 │   ├── kb_refine.py              # 26b draft refinement pipeline (async + sync)
 │   └── run.py                    # CLI entry point with streaming and memory commands
 ├── bridge/
@@ -232,13 +235,17 @@ agent-zero/
 │   └── setup_ollama.sh           # Ollama env var setup for Apple Silicon
 ├── project_outputs/              # Default output dir for generated CLAUDE.md files
 ├── tests/
+│   ├── test_agent_prompt.py      # Conditional prompt assembly, budget, KB hits, snapshot capture (26 tests)
 │   ├── test_api.py               # Knowledge CRUD, auth, privacy, CLAUDE.md routes (28 tests)
 │   ├── test_chat_api.py          # SSE auth, WebSocket auth, static serving (10 tests)
+│   ├── test_chat_streaming.py    # Stream events, empty response detection, async offload (8 tests)
 │   ├── test_chunker.py           # Section-based markdown chunking, heading tree (27 tests)
 │   ├── test_claude_md.py         # Bridge scoring, budget, path resolution (18 tests)
 │   ├── test_embeddings.py        # OllamaEmbedding function, model config, batching (4 tests)
+│   ├── test_integration.py       # Real Ollama e2b: greeting, factual, tools, prompt, memory (5 tests)
 │   ├── test_kb_index.py          # Semantic search, sync, index/remove, grouped results (19 tests)
 │   ├── test_kb_refine.py         # Draft refinement pipeline, swap verification (9 tests)
+│   ├── test_kb_tools.py          # KB tool functions: section loads, tree, search, save, snapshot (41 tests)
 │   ├── test_knowledge_store.py   # KB file ops, frontmatter, search, index, log (41 tests)
 │   ├── test_entity_registry.py   # Entity store, resolution, extraction, aliases (42 tests)
 │   ├── test_memory_manager.py    # Memory pipeline, dedup, contradiction, pruning (23 tests)
@@ -347,13 +354,14 @@ CLI thread commands: `new` (start fresh thread), `quit`
 | KB context engineering | done | Semantic search, LLM summaries, token-aware reads, section chunking, 64K context |
 | Model orchestration | done | Three-model lifecycle, on-demand 26b, draft/refine pipeline |
 | Embedding upgrade + memory compression | done | nomic-embed-text (8192 tokens, 768 dims), memory summaries, grouped KB discovery |
-| Soft decay + entity registry | done | Additive recency tiebreaker, SQLite entity store with LLM extraction, token architecture fix, 294 tests passing |
+| Soft decay + entity registry | done | Additive recency tiebreaker, SQLite entity store with LLM extraction, token architecture fix |
+| Conditional prompt + snapshot | done | Split system prompt (core always, KB conditional), snapshot_to_knowledge tool, 378 tests passing |
 
 ---
 
 ## Next steps
 
-**Eval framework / agent lightning** -- systematic evaluation of agent responses. Measure quality, track regressions, benchmark prompt changes. Possibly DSPy GEPA for automated prompt evolution.
+**Eval framework** -- systematic evaluation of agent responses. Measure quality, track regressions, benchmark prompt changes. Possibly DSPy GEPA for automated prompt evolution.
 
 **Self-learning and fine-tuning** -- continuous improvement from interaction data. MLX LoRA fine-tuning on accumulated conversation logs. The agent gets better the more you use it.
 
@@ -363,6 +371,14 @@ CLI thread commands: `new` (start fresh thread), `quit`
 ---
 
 ## Technical decisions
+
+**Why conditional system prompt assembly**
+
+A monolith system prompt wastes tokens on every conversational message. "What time is it?" does not need KB retrieval rules, budget tracking, or section-loading directives. The system prompt is split into `_CORE_PROMPT` (~350 tokens, always present -- personality, tool list, snapshot instruction) and `_KB_PROMPT` (~300 tokens, injected only when `bool(kb_hits) or kb_loads > 0`). Conversational messages get ~65% smaller system prompts. The KB block includes retrieval workflow, rules, budget line, and escalating directives (low context, retrieval limit reached).
+
+**Why snapshot_to_knowledge instead of requiring content in save_knowledge**
+
+Small models (e4b, ~4B params) cannot reliably reproduce a 2000-token response as a tool call argument. The model stalls -- emits an empty AI message with no content and no tool calls. `snapshot_to_knowledge` sidesteps this entirely: `_build_prompt` captures the last AI response into `tools._last_agent_response` on every model invocation. When the user says "snapshot" or "save that," the tool reads the captured content directly. The model only needs to provide an optional topic string, not reproduce the content.
 
 **Why LLM novelty checking instead of cosine thresholds for memory**
 
@@ -480,21 +496,23 @@ Set `ws.binaryType = 'arraybuffer'` before TTS audio arrives (already set in `ap
 
 ## Tests
 
-294 tests, all passing. The suite runs in under 25 seconds with no network calls, no running Ollama instance, and no GPU required -- every external dependency (Ollama, ChromaDB production data, LLM inference) is mocked or replaced with ephemeral fixtures.
+378 tests, all passing. The unit/mock suite runs in under 25 seconds with no network calls and no GPU required. Integration tests (5 tests in `test_integration.py`) hit a real Ollama e2b instance and skip automatically if Ollama is not running.
 
 Coverage spans the full stack:
 
-- **API layer** -- authentication (bearer token, timing-safe comparison), authorization (privacy filtering, path traversal rejection), all CRUD routes, CLAUDE.md generation and write workflows, SSE chat streaming, WebSocket voice auth handshake, static file serving.
-- **Knowledge base** -- file operations (save, read, list, search), frontmatter parsing, tag filtering, filename sanitization, subdirectory handling, auto-generated index and audit log. Semantic search via ChromaDB with ephemeral collections per test. File-level metadata (token counts, section outlines), grouped search results. Section-based markdown chunking (H1-H5 detection, recursive splitting, hard-split with token overlap). Heading tree construction with subtree token rollup, tree formatting, deep nesting (H1 through H5), sibling vs. parent-child level handling. Token counting and truncation.
-- **Embeddings** -- OllamaEmbedding function (model config, Ollama client, batching, host configuration).
-- **Memory pipeline** -- noise filtering, LLM-based tagging, deduplication (cosine distance threshold), contradiction detection and replacement, novelty checking, capacity-only pruning (no age-based deletion), soft decay (additive recency tiebreaker). Compact summary generation (LLM and fallback paths), compact retrieval, summary metadata storage.
-- **Entity registry** -- registration, resolution by name and alias, touch/update, search, list, delete, summary update, alias management, LLM extraction (mocked), process entities integration, entity count.
-- **Model lifecycle** -- ensure/unload/swap functions for both async and sync contexts, VRAM swap sequencing for KB refinement, `keep_alive=0` unload calls.
-- **KB refinement pipeline** -- draft/refine flow with mocked ChatOllama, swap-to-26b and swap-back verification, fallback behavior on empty responses and LLM errors, save and re-index after refinement.
-- **CLAUDE.md bridge** -- recency decay scoring, canon bonus, budget-aware file selection, path resolution (absolute vs. relative), truncation handling.
-- **Voice** -- VAD state machine (silence, speaking, trailing silence, max duration), wake word detection (substring matching, case insensitivity, punctuation handling), TTS sentence splitting, echo suppression during playback, PCM conversion roundtrip.
+- **Agent core** -- conditional prompt assembly (_CORE_PROMPT always, _KB_PROMPT only when KB relevant), KB load counting, memory injection, context budget computation, escalating directives (low context, retrieval limit), KB hit injection, tools module state sync, last-AI-response capture for snapshot.
+- **KB tools** -- read_knowledge_section (pass-1 fuzzy match, pass-2 heading search, refusal at limit), read_knowledge tree output, search_knowledge grouped results, save_knowledge (new files, overwrites, canon rejection), list_knowledge, snapshot_to_knowledge (auto-capture, topic slugification, empty response handling), entity tool wrappers.
+- **Chat streaming** -- SSE stream event handling, empty AI message detection (the stall bug that started this), store_exchange async offload.
+- **Integration** -- real Ollama e2b: greeting response, factual question, tool use (get_current_time), prompt size for conversational messages, multi-turn memory context.
+- **API layer** -- authentication (bearer token, timing-safe), authorization (privacy filtering, path traversal rejection), CRUD routes, CLAUDE.md generation, SSE chat, WebSocket voice auth, static serving.
+- **Knowledge base** -- file operations, frontmatter, tag filtering, sanitization, subdirectories, index/log auto-generation. Semantic search (ephemeral ChromaDB), file-level metadata, grouped results. Markdown chunking (H1-H5, recursive split, hard-split with overlap). Heading tree with subtree rollup. Token counting.
+- **Memory pipeline** -- noise filtering, tagging, dedup, contradiction, novelty, capacity-only pruning, soft decay. Summary generation (LLM + fallback), compact retrieval.
+- **Entity registry** -- registration, resolution, aliases, search, LLM extraction, mention tracking.
+- **Model lifecycle** -- ensure/unload/swap (async + sync), VRAM sequencing, KB refinement pipeline.
+- **CLAUDE.md bridge** -- scoring, budget, path resolution, truncation.
+- **Voice** -- VAD state machine, wake word, TTS splitting, echo suppression.
 
-Tests are isolated by design -- each test file sets up its own fixtures (temp directories, monkeypatched module state, ephemeral ChromaDB clients) so they can run in any order with no shared state.
+Tests are isolated by design -- each test file manages its own fixtures (temp dirs, monkeypatched state, ephemeral ChromaDB) with no shared state between files.
 
 ```bash
 ./venv-agent-zero/bin/python -m pytest tests/ -v
