@@ -1,17 +1,17 @@
 # Agent Zero
 
 #### Save $ on AI and keep your knowledge base local.
-- 🤖agent-zero: a free, on-device LangGraph agent (Ollama + Gemma 4) with web UI, obsidian knowledge base read/write/RAG, and long-term conversation memory.
-- 🔌Designed to partner with CLAUDE Code - agent-zero assembles project context from your knowledge base into documentation and config files for Claude Code, saving on token / usage limits for project scaffolding
-- 👨🏻‍💻100% local - Agent Zero runs locally - no cloud, no subscriptions, no data leaving your machine
-- 💻Web UI - chatbot app with live context window tracking
-- 🗣️Voice chat - wake word detection, Whisper STT, macOS TTS - discuss a project idea with the agent while your hands are busy and turn rough ideas into clean documentation without touching your computer
-- 🔀Multi-model - 4B for chat, 26B for writing, 70B+ for reasoning, swap with a dropdown
-- 📚Three-step KB retrieval - semantic search, heading trees with token costs, the agent loads only what it needs and manages its context window with a live token budget
-- 📸Snapshot capture - say “snapshot” or “save that” to save the agent's last response as a knowledge base file
-- 🧠Multi-layered memory - deduplication, contradiction detection, LLM-based novelty filtering for recall
-- 📓Obsidian-compatible knowledge base the agent reads and writes, plus a sidecar read-only "canon" knowledge folder
-- 🔐REST API with bearer token auth
+- 🤖 agent-zero: a free, on-device LangGraph agent (Ollama + Gemma 4) with web UI, obsidian knowledge base read/write/RAG, and long-term conversation memory.
+- 👨🏻‍💻 100% local - Agent Zero runs locally - no cloud, no subscriptions, no data leaving your machine
+- 💻 Web UI - chatbot app with live context window tracking
+- 🗣️ Voice chat - wake word detection, Whisper STT, macOS TTS - discuss a project idea with the agent while your hands are busy and turn rough ideas into clean documentation without touching your computer
+- 🔀 Multi-model - 4B for chat, 26B for writing, 70B+ for reasoning, swap with a dropdown
+- 📚 Three-step KB retrieval - semantic search, heading trees with token costs, the agent loads only what it needs and manages its context window with a live token budget
+- 📸 Snapshot capture - say “snapshot” or “save that” to save the agent's last response as a knowledge base file
+- 🧠 Multi-layered memory - deduplication, contradiction detection, LLM-based novelty filtering for recall
+- 📓 Obsidian-compatible knowledge base the agent reads and writes, plus a sidecar read-only "canon" knowledge folder
+- 🔐 REST API with bearer token auth
+- 🔌 Designed to partner with CLAUDE Code - agent-zero assembles project context from your knowledge base into documentation and config files for Claude Code, saving on token / usage limits for project scaffolding
 
 ![Agent Zero Web UI](static_assets/agent-zero-screenshot.png)
 
@@ -20,21 +20,6 @@ A local AI agent built on LangGraph and Ollama. Persistent memory, a knowledge b
 Designed to run alongside Claude Code: Agent Zero maintains project context in `CLAUDE.md` files that Claude Code reads automatically at session start. The two systems share a knowledge layer without any shared process or SDK dependency.
 
 **Created:** April 2026
-
----
-
-## What it does
-
-- **Text chat** via browser (SSE streaming) or terminal CLI
-- **Voice chat** via WebSocket -- wake word detection, Whisper STT, macOS TTS
-- **Long-term memory** -- every conversation is embedded in ChromaDB (nomic-embed-text, 8192 token context) with smart deduplication, contradiction detection, LLM-based novelty filtering, compact summaries for low-cost injection, and soft decay (recency as tiebreaker, never a filter)
-- **Entity registry** -- SQLite-backed store of named entities (people, places, projects, concepts) automatically extracted from conversations via e2b, with alias dedup and mention tracking
-- **Knowledge base** -- Obsidian-compatible markdown files the agent owns and manages, with semantic search, heading trees (H1-H5 with subtree token counts), and three-step retrieval (search summaries -> browse tree -> load sections)
-- **Conditional system prompt** -- core prompt always present (~350 tokens); KB workflow rules and retrieval directives injected only when the knowledge base is relevant to the query. Conversational messages get ~65% smaller system prompts
-- **Snapshot capture** -- user says "snapshot" or "save that" and the agent's last response is saved as a KB file automatically. No content reproduction required -- the response is captured before the model runs
-- **Multi-model orchestration** -- e4b handles chat, e2b handles tagging, 26b loads on-demand for KB file creation (draft/refine pipeline) or manual toggle, then unloads immediately
-- **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
-- **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
 
 ---
 
@@ -359,13 +344,15 @@ CLI thread commands: `new` (start fresh thread), `quit`
 
 ---
 
-## Next steps
+## Roadmap
 
-**Eval framework** -- systematic evaluation of agent responses. Measure quality, track regressions, benchmark prompt changes. Possibly DSPy GEPA for automated prompt evolution.
+**Eval framework** -- systematic quality measurement for agent responses. Track regressions, benchmark prompt changes, possibly DSPy GEPA for automated prompt evolution.
 
-**Self-learning and fine-tuning** -- continuous improvement from interaction data. MLX LoRA fine-tuning on accumulated conversation logs. The agent gets better the more you use it.
+**Self-learning and fine-tuning** -- MLX LoRA fine-tuning on accumulated conversation logs. The agent improves with use.
 
-**Web research** -- the agent launches sub-agents to browse and scrape the web, pulling discovered material into the knowledge base. Looking at local-first options that do not require API keys -- Firecrawl (self-hosted), Crawl4AI, or similar headless browser scraping. The flow: agent identifies a research need, spawns a scraper, ingests results as KB files, indexes them for future retrieval.
+**Web research** -- agent-launched browsing and scraping, pulling discovered material into the knowledge base. Local-first only (Firecrawl self-hosted, Crawl4AI).
+
+**KB indexing performance** -- first boot after adding large files is slow: LLM summaries are generated serially, one `e2b` inference call per chunk (~1-2s each). A 100K-word batch produces 70+ chunks -- 70-140 seconds just for summaries. Fix: generate mechanical summaries at boot for immediate startup, upgrade to LLM summaries in a background thread after the agent is responsive.
 
 
 ---
@@ -382,11 +369,7 @@ Small models (e4b, ~4B params) cannot reliably reproduce a 2000-token response a
 
 **Why LLM novelty checking instead of cosine thresholds for memory**
 
-Cosine distance tells you whether two texts are about the same topic -- it does not tell you whether one adds new information beyond the other. "My favorite color is blue" and "My favorite color is blue, specifically cobalt, not navy" land at very similar distances. A fixed threshold either discards real details or lets noise through. The solution is to ask the fast model (E2B) directly: "does this add new information?" That judgment requires language understanding, not vector arithmetic.
-
-**Why category/subcategory tagging**
-
-Without scoped comparisons, "my favorite color is green" collides with "I like green tea" -- both mention green, both land nearby. The two-level taxonomy (`user-preference/favorite-color`, `user-preference/favorite-food`) keeps comparisons semantically grounded. Update vs. addition intent prevents additions from triggering contradiction replacement -- "I also like sushi" should stack alongside "I love pizza," not replace it.
+Cosine distance tells you whether two texts are about the same topic -- it does not tell you whether one adds new information beyond the other. "My favorite color is blue" and "My favorite color is blue, specifically cobalt, not navy" land at very similar distances. A fixed threshold either discards real details or lets noise through. The solution is to ask the fast model (e2b) directly: "does this add new information?" That judgment requires language understanding, not vector arithmetic.
 
 **Why `langchain-ollama` not `langchain-community`**
 
@@ -398,57 +381,21 @@ The CLI uses sync `SqliteSaver`. The web server uses `AsyncSqliteSaver` so `agen
 
 **Why Ollama env vars via `launchctl` on macOS**
 
-Ollama runs as a macOS launch agent. Environment variables set with `export` in your shell are not inherited by it. You have to use `launchctl setenv` and restart Ollama. This applies to all Ollama config: `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, model limits, etc.
-
-**Why full regeneration on CLAUDE.md updates**
-
-Merging or diffing against an existing CLAUDE.md would require parsing it back into structure and reconciling with the source knowledge files. Full regeneration is simpler, deterministic, and the file is explicitly marked as auto-generated -- manual edits are not preserved by design.
+Ollama runs as a macOS launch agent. Environment variables set with `export` in your shell are not inherited by it. Use `launchctl setenv` and restart Ollama. This applies to all Ollama config: `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, model limits, etc.
 
 **Why three-step KB retrieval -- never auto-load content**
 
-Naive retrieval dumps full file content into the context window. Even a medium-sized file (30-40% of context) seems fine in isolation, but three of them back-to-back leaves no room for the model to generate a response. The fundamental problem: the agent needs to control exactly how many tokens it consumes, every time, with full visibility into the cost.
+Naive retrieval dumps full file content into the context window. A medium-sized file seems fine in isolation, but load three back-to-back and the model has no room to respond. The solution is three steps where content never loads automatically: passive awareness (semantic search results injected into the system prompt at ~120-160 tokens, zero content), active discovery (heading trees with H1-H5 hierarchy and cumulative token counts per subtree, zero content), and selective loading (the agent calls `read_knowledge_section` for exactly the sections it chose, checking token cost against remaining budget first).
 
-The solution is three steps where content never loads automatically:
-
-1. *Passive awareness* -- every user message triggers a semantic search against the KB index. The top 3 files are injected into the system prompt with file-level metadata (total tokens, section outline) and the best-matched section summaries. The agent knows what files exist, how big they are, what sections they contain, and which sections matched -- without loading any content. Cost: ~120-160 tokens.
-2. *Active discovery* -- the agent calls `search_knowledge`, which returns filenames, section headings, and summaries. Or calls `read_knowledge`, which returns a heading tree -- the full H1-H5 hierarchy with cumulative token counts per subtree. Neither loads any content. The agent can see that "## Star Schema" costs 6,200 tokens total but its child "### Fact Tables" is only 2,500. Cost: the tree itself, ~50-200 tokens.
-3. *Selective loading* -- the agent calls `read_knowledge_section` to load exactly the sections it chose from the tree. Each load is a deliberate decision -- the agent checks the section's token cost against remaining budget before every call.
-
-A live context budget line is injected into the system prompt on every turn:
-
-```
-[Context budget: 12,400 / 65,536 tokens used (18%) | 51,088 tokens available | reserve 2,048 for response]
-```
-
-The system prompt tells the agent: below 10,000 available, load only the single most relevant section. Below 5,000, stop loading entirely and work with what you have.
-
-The result: the agent can navigate a knowledge base much larger than its context window, work across multiple files in a single conversation, and never accidentally crowd out its own ability to respond. Every token consumed from the KB is a choice, not an accident.
-
-**Why heading trees instead of flat section lists**
-
-An early version returned a flat numbered list of sections with token counts when a file exceeded the context budget. This worked for single files but gave the agent no structural information -- it could not tell which sections were children of which, or what the cumulative cost of a topic branch was. Worse, files under the budget limit auto-loaded their full content, so the agent had no way to be selective with medium-sized files.
-
-The heading tree (H1-H5, `HeadingNode` dataclass with `subtree_tokens` rolled up from leaves) solves both problems. The agent sees the hierarchy and cumulative costs at every level. `read_knowledge` always returns the tree, never content -- even for small files. The agent shops from the tree and loads sections one at a time via `read_knowledge_section`. This makes context consumption fully deliberate regardless of file size.
-
-**Why live context budget tracking**
-
-The agent has a 65K token context window shared between the system prompt, conversation history, tool results, and its own response. Without visibility into how much is used, there is no way to make informed loading decisions. A budget line is injected into the system prompt on every turn with tokens used, tokens available, and generation reserve. The system prompt includes hard thresholds (10K: be selective, 5K: stop loading) so the agent degrades gracefully instead of running out of room to respond.
+A live budget line is injected into the system prompt every turn -- tokens used / available / reserve -- with hard thresholds at 10K (be selective) and 5K (stop loading). Every KB token consumed is a deliberate choice.
 
 **Why nomic-embed-text instead of ChromaDB's default embeddings**
 
-ChromaDB ships with all-MiniLM-L6-v2 (22M params, 256 token context, 384 dimensions). A typical memory exchange is 100-300 tokens; a KB chunk can be thousands. Everything beyond 256 tokens is invisible to the embedding -- retrieval is flying blind on most content. nomic-embed-text (137M params, 8192 token context, 768 dimensions) covers essentially all stored content. It runs via Ollama at ~300MB VRAM, coexists with the chat and tagger models, and uses the same embedding function for both the conversations and knowledge collections. Swapping models is a one-line config change (`EMBED_MODEL` in `.env`).
+ChromaDB ships with all-MiniLM-L6-v2 (22M params, 256 token context). A typical memory exchange is 100-300 tokens; a KB chunk can be thousands. Everything beyond 256 tokens is invisible to the embedding -- retrieval is flying blind on most content. nomic-embed-text (137M params, 8192 token context, 768 dims) covers essentially all stored content, runs at ~300MB VRAM via Ollama, and uses the same embedding function for both the conversations and knowledge collections. ChromaDB is the vector store for the same reason: Python-native, no server process, fits the local-first constraint.
 
 **Why compact memory summaries instead of raw exchange injection**
 
-Raw "User: X\nAgent: Y" exchange text costs 80-150 tokens per memory. Three memories per turn = 240-450 tokens of context burned on verbatim recall. A 1-sentence summary generated by e2b at write time costs 30-40 tokens and preserves the semantic core. The compact retrieval function (`get_relevant_context_compact`) returns summaries when available and falls back to raw text for legacy docs, so the transition is non-destructive.
-
-**Why grouped KB search results with file-level metadata**
-
-The original flat search format (`filename: section -- summary`) gave the agent zero structural context about matched files. It couldn't tell how many other sections existed, how large the file was, or whether it needed to call `read_knowledge` to browse the tree. Enriching each indexed chunk with file-level metadata (`file_tokens`, `section_count`, `file_outline`) and grouping search results by file lets the agent see the full picture at discovery time. Cost: ~60-80 extra tokens per turn. Payoff: eliminates unnecessary `read_knowledge` calls, each of which costs a full tool round-trip plus the tree output.
-
-**Why ChromaDB**
-
-Simplest local vector store -- Python-native, no server process, straightforward API. The memory pipeline's novelty checking compensates for its limitations around semantic discrimination. txtai (graph relationships + semantic SQL) is on the roadmap if ChromaDB proves insufficient after more real usage.
+Raw "User: X\nAgent: Y" exchange text costs 80-150 tokens per memory. Three memories per turn = 240-450 tokens of context burned on verbatim recall. A 1-sentence summary generated by e2b at write time costs 30-40 tokens and preserves the semantic core. The compact retrieval function falls back to raw text for legacy entries, so the transition is non-destructive.
 
 
 ---
@@ -498,21 +445,9 @@ Set `ws.binaryType = 'arraybuffer'` before TTS audio arrives (already set in `ap
 
 378 tests, all passing. The unit/mock suite runs in under 25 seconds with no network calls and no GPU required. Integration tests (5 tests in `test_integration.py`) hit a real Ollama e2b instance and skip automatically if Ollama is not running.
 
-Coverage spans the full stack:
+Coverage spans the full stack: agent prompt assembly (conditional core/KB split, budget, snapshot capture), KB tools (retrieval, search, save, snapshot), chat streaming (SSE events, empty response detection), API auth and CRUD, knowledge store file ops and semantic search, markdown chunking and heading trees, memory pipeline (tagging, dedup, contradiction, novelty, soft decay, compact summaries), entity registry, model lifecycle (VRAM swap, KB refinement), CLAUDE.md bridge, and voice (VAD, STT, TTS). Integration tests hit a real running Ollama instance and skip automatically when one isn't available.
 
-- **Agent core** -- conditional prompt assembly (_CORE_PROMPT always, _KB_PROMPT only when KB relevant), KB load counting, memory injection, context budget computation, escalating directives (low context, retrieval limit), KB hit injection, tools module state sync, last-AI-response capture for snapshot.
-- **KB tools** -- read_knowledge_section (pass-1 fuzzy match, pass-2 heading search, refusal at limit), read_knowledge tree output, search_knowledge grouped results, save_knowledge (new files, overwrites, canon rejection), list_knowledge, snapshot_to_knowledge (auto-capture, topic slugification, empty response handling), entity tool wrappers.
-- **Chat streaming** -- SSE stream event handling, empty AI message detection (the stall bug that started this), store_exchange async offload.
-- **Integration** -- real Ollama e2b: greeting response, factual question, tool use (get_current_time), prompt size for conversational messages, multi-turn memory context.
-- **API layer** -- authentication (bearer token, timing-safe), authorization (privacy filtering, path traversal rejection), CRUD routes, CLAUDE.md generation, SSE chat, WebSocket voice auth, static serving.
-- **Knowledge base** -- file operations, frontmatter, tag filtering, sanitization, subdirectories, index/log auto-generation. Semantic search (ephemeral ChromaDB), file-level metadata, grouped results. Markdown chunking (H1-H5, recursive split, hard-split with overlap). Heading tree with subtree rollup. Token counting.
-- **Memory pipeline** -- noise filtering, tagging, dedup, contradiction, novelty, capacity-only pruning, soft decay. Summary generation (LLM + fallback), compact retrieval.
-- **Entity registry** -- registration, resolution, aliases, search, LLM extraction, mention tracking.
-- **Model lifecycle** -- ensure/unload/swap (async + sync), VRAM sequencing, KB refinement pipeline.
-- **CLAUDE.md bridge** -- scoring, budget, path resolution, truncation.
-- **Voice** -- VAD state machine, wake word, TTS splitting, echo suppression.
-
-Tests are isolated by design -- each test file manages its own fixtures (temp dirs, monkeypatched state, ephemeral ChromaDB) with no shared state between files.
+Each test file manages its own fixtures -- temp dirs, monkeypatched module state, ephemeral ChromaDB clients. No shared state between files.
 
 ```bash
 ./venv-agent-zero/bin/python -m pytest tests/ -v
