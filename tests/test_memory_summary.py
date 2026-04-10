@@ -31,27 +31,19 @@ class TestGenerateMemorySummary:
         """When LLM succeeds, returns its output."""
         mock_response = MagicMock()
         mock_response.content = "User asked about pizza preferences."
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        with patch("memory.memory_manager.ChatOllama", create=True) as MockLLM:
-            mock_llm = MagicMock()
-            mock_llm.invoke.return_value = mock_response
-            # Patch the lazy import inside the function
-            with patch.dict("sys.modules", {
-                "langchain_ollama": MagicMock(ChatOllama=lambda **kwargs: mock_llm)
-            }):
-                result = mm._generate_memory_summary(
-                    "I love pepperoni pizza", "Great choice!"
-                )
+        with patch("agent.llm.make_chat_ollama", return_value=mock_llm):
+            result = mm._generate_memory_summary(
+                "I love pepperoni pizza", "Great choice!"
+            )
 
         assert "pizza" in result.lower()
 
     def test_fallback_on_llm_failure(self):
         """When LLM raises, falls back to user message prefix."""
-        with patch.dict("sys.modules", {
-            "langchain_ollama": MagicMock(
-                ChatOllama=MagicMock(side_effect=RuntimeError("no model"))
-            )
-        }):
+        with patch("agent.llm.make_chat_ollama", side_effect=RuntimeError("no model")):
             result = mm._generate_memory_summary(
                 "I love pepperoni pizza with hot honey", "Sounds great!"
             )
@@ -60,17 +52,12 @@ class TestGenerateMemorySummary:
 
     def test_truncates_long_summary(self):
         """Summary output capped at 200 chars."""
-        long_text = "A" * 500
         mock_response = MagicMock()
-        mock_response.content = long_text
+        mock_response.content = "A" * 500
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = mock_response
 
-        with patch.dict("sys.modules", {
-            "langchain_ollama": MagicMock(
-                ChatOllama=lambda **kwargs: MagicMock(
-                    invoke=MagicMock(return_value=mock_response)
-                )
-            )
-        }):
+        with patch("agent.llm.make_chat_ollama", return_value=mock_llm):
             result = mm._generate_memory_summary("test", "test")
 
         assert len(result) <= 200
@@ -78,11 +65,7 @@ class TestGenerateMemorySummary:
     def test_fallback_truncates_user_msg(self):
         """Fallback caps user message at 200 chars."""
         long_msg = "word " * 100  # 500 chars
-        with patch.dict("sys.modules", {
-            "langchain_ollama": MagicMock(
-                ChatOllama=MagicMock(side_effect=Exception("fail"))
-            )
-        }):
+        with patch("agent.llm.make_chat_ollama", side_effect=Exception("fail")):
             result = mm._generate_memory_summary(long_msg, "ok")
 
         assert len(result) <= 200

@@ -21,6 +21,21 @@ EMBED_MAX_TOKENS: int = int(os.getenv("EMBED_MAX_TOKENS", "1800"))
 # Ollama
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
+# Provider toggle: "local" (default) or "cloud"
+OLLAMA_PROVIDER: str = os.getenv("OLLAMA_PROVIDER", "local")
+IS_CLOUD: bool = OLLAMA_PROVIDER == "cloud"
+OLLAMA_CLOUD_URL: str = os.getenv("OLLAMA_CLOUD_URL", "https://api.ollama.com")
+OLLAMA_CLOUD_API_KEY: str = os.getenv("OLLAMA_CLOUD_API_KEY", "")
+
+# Cloud model name overrides (fall back to local names if not set)
+CLOUD_CHAT_MODEL: str = os.getenv("CLOUD_CHAT_MODEL", "")
+CLOUD_KB_REFINE_MODEL: str = os.getenv("CLOUD_KB_REFINE_MODEL", "")
+CLOUD_FAST_MODEL: str = os.getenv("CLOUD_FAST_MODEL", "")
+CLOUD_VOICE_MODEL: str = os.getenv("CLOUD_VOICE_MODEL", "")
+
+# Route embeddings through provider toggle (opt-in; same model = no re-index needed)
+EMBED_FOLLOWS_PROVIDER: bool = os.getenv("EMBED_FOLLOWS_PROVIDER", "false").lower() == "true"
+
 # Paths (relative to project root)
 AGENT_DB_PATH: str = str(_project_root / os.getenv("AGENT_DB_PATH", "data/agent_memory.db"))
 CHROMA_DB_PATH: str = str(_project_root / os.getenv("CHROMA_DB_PATH", "data/chroma_db"))
@@ -48,6 +63,14 @@ API_PORT: int = int(os.getenv("API_PORT", "8900"))
 
 # Voice
 VOICE_MODEL: str = os.getenv("VOICE_MODEL", "gemma4:e4b")
+
+# Effective model names -- cloud override if IS_CLOUD, else local names
+# These are startup-time constants; runtime toggling is handled by agent/runtime_config.py
+EFFECTIVE_CHAT_MODEL: str = (CLOUD_CHAT_MODEL or FAST_TEXT_MODEL) if IS_CLOUD else FAST_TEXT_MODEL
+EFFECTIVE_KB_REFINE_MODEL: str = (CLOUD_KB_REFINE_MODEL or MAIN_MODEL) if IS_CLOUD else MAIN_MODEL
+EFFECTIVE_FAST_MODEL: str = (CLOUD_FAST_MODEL or FAST_MODEL) if IS_CLOUD else FAST_MODEL
+EFFECTIVE_VOICE_MODEL: str = (CLOUD_VOICE_MODEL or VOICE_MODEL) if IS_CLOUD else VOICE_MODEL
+
 VOICE_LANGUAGE: str = os.getenv("VOICE_LANGUAGE", "en")
 VOICE_MIN_RMS: float = float(os.getenv("VOICE_MIN_RMS", "0.01"))
 VOICE_CHUNK_SECONDS: int = int(os.getenv("VOICE_CHUNK_SECONDS", "3"))

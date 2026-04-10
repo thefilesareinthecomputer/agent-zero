@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from agent.config import FAST_MODEL, OLLAMA_BASE_URL
+from agent.config import EFFECTIVE_FAST_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -313,8 +313,8 @@ def extract_entities(text: str) -> list[dict]:
     Falls back to empty list on any error.
     """
     try:
-        import ollama
-        client = ollama.Client(host=OLLAMA_BASE_URL)
+        from agent.llm import make_ollama_client
+        client = make_ollama_client()
 
         prompt = (
             "Extract named entities from this text. For each entity, return "
@@ -327,7 +327,7 @@ def extract_entities(text: str) -> list[dict]:
         )
 
         response = client.chat(
-            model=FAST_MODEL,
+            model=EFFECTIVE_FAST_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"num_predict": 200},
         )

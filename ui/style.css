@@ -460,6 +460,37 @@ button:hover { background: #282828; border-color: #3a3a3a; }
   flex-shrink: 0;
 }
 
+#provider-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+#provider-btn.provider-local { color: var(--text-dim); }
+
+#provider-btn.provider-cloud {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.model-label {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+  flex-shrink: 0;
+}
+
 #agent-select {
   background: var(--bg-input);
   border: 1px solid var(--border);

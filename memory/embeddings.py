@@ -15,7 +15,7 @@ Then set EMBED_MODEL=nomic-embed-8k and EMBED_MAX_TOKENS=7500 in .env.
 
 from chromadb import Documents, EmbeddingFunction, Embeddings
 
-from agent.config import EMBED_MODEL, OLLAMA_BASE_URL
+from agent.config import EMBED_FOLLOWS_PROVIDER, EMBED_MODEL, OLLAMA_BASE_URL
 
 
 class OllamaEmbedding(EmbeddingFunction):
@@ -38,9 +38,12 @@ class OllamaEmbedding(EmbeddingFunction):
         return {"model": EMBED_MODEL, "host": OLLAMA_BASE_URL}
 
     def __call__(self, input: Documents) -> Embeddings:
-        import ollama as _ollama_client
-
-        client = _ollama_client.Client(host=OLLAMA_BASE_URL)
+        if EMBED_FOLLOWS_PROVIDER:
+            from agent.llm import make_ollama_client
+            client = make_ollama_client()
+        else:
+            import ollama as _ollama_client
+            client = _ollama_client.Client(host=OLLAMA_BASE_URL)
         results = []
         for text in input:
             resp = client.embed(model=EMBED_MODEL, input=text)

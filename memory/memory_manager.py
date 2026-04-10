@@ -40,15 +40,10 @@ def _generate_memory_summary(user_msg: str, agent_msg: str) -> str:
     is unavailable or returns garbage.
     """
     try:
-        from langchain_ollama import ChatOllama
-        from agent.config import FAST_MODEL, OLLAMA_BASE_URL
+        from agent.config import EFFECTIVE_FAST_MODEL
+        from agent.llm import make_chat_ollama
 
-        llm = ChatOllama(
-            model=FAST_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            num_ctx=2048,
-            num_predict=64,
-        )
+        llm = make_chat_ollama(model=EFFECTIVE_FAST_MODEL, num_ctx=2048, num_predict=64)
         prompt = (
             "Summarize this exchange in one sentence. "
             "Be specific. Return only the summary.\n\n"

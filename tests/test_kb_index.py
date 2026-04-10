@@ -35,6 +35,8 @@ def _ephemeral_collection(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(kb_index_mod, "_client", client)
     monkeypatch.setattr(kb_index_mod, "_collection", collection)
+    # Manifest file goes to tmp_path so tests don't pollute real data
+    monkeypatch.setattr(kb_index_mod, "_MANIFEST_PATH", tmp_path / "kb_manifest.json")
     yield collection
 
 

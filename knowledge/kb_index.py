@@ -9,6 +9,7 @@ re-processed. LLM summaries are generated at index time using the fast
 model (e2b) via ChatOllama.
 """
 
+import json
 import logging
 import os
 import time
@@ -18,8 +19,8 @@ from pathlib import Path
 import chromadb
 
 from agent.config import (
-    CHROMA_DB_PATH, EMBED_MAX_TOKENS, FAST_MODEL, KNOWLEDGE_CANON_PATH,
-    KNOWLEDGE_PATH, OLLAMA_BASE_URL,
+    CHROMA_DB_PATH, EMBED_MAX_TOKENS, EFFECTIVE_FAST_MODEL,
+    KNOWLEDGE_CANON_PATH, KNOWLEDGE_PATH,
 )
 from knowledge.chunker import chunk_file
 from knowledge.knowledge_store import _parse_frontmatter
@@ -33,6 +34,23 @@ _collection: chromadb.Collection | None = None
 _KNOWLEDGE_DIR = Path(KNOWLEDGE_PATH)
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
 _SKIP_FILES = {"index.md", "log.md"}
+_MANIFEST_PATH = Path(CHROMA_DB_PATH).parent / "kb_manifest.json"
+
+
+def _load_manifest() -> dict[str, int]:
+    """Load mtime manifest from disk. Returns empty dict if missing."""
+    if _MANIFEST_PATH.exists():
+        try:
+            return json.loads(_MANIFEST_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def _save_manifest(manifest: dict[str, int]) -> None:
+    """Write mtime manifest to disk."""
+    _MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _MANIFEST_PATH.write_text(json.dumps(manifest, indent=2))
 
 
 def _get_kb_collection() -> chromadb.Collection:
@@ -57,14 +75,8 @@ def _generate_summary(content: str, heading: str) -> str:
     fallback = _mechanical_summary(content)
 
     try:
-        from langchain_ollama import ChatOllama
-
-        llm = ChatOllama(
-            model=FAST_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            num_ctx=4096,
-            num_predict=128,
-        )
+        from agent.llm import make_chat_ollama
+        llm = make_chat_ollama(model=EFFECTIVE_FAST_MODEL, num_ctx=16384, num_predict=128)
         prompt = (
             f"Summarize this section titled '{heading}' in 1-2 sentences. "
             "Be specific about what it covers. Return only the summary, "
@@ -126,7 +138,7 @@ def index_file(
         log.warning("KB index: could not read %s", path)
         return 0
 
-    mtime = path.stat().st_mtime
+    mtime = int(path.stat().st_mtime)
 
     # Extract frontmatter metadata before chunking
     frontmatter, _ = _parse_frontmatter(text)
@@ -141,13 +153,7 @@ def index_file(
     if not chunks:
         return 0
 
-    # Remove existing chunks for this file
-    remove_file(filename, source)
-
     collection = _get_kb_collection()
-    ids = []
-    documents = []
-    metadatas = []
 
     # Compute file-level stats once for all chunks
     file_tokens = sum(c["token_count"] for c in chunks)
@@ -164,6 +170,10 @@ def index_file(
     file_outline = " | ".join(seen)
     if len(file_outline) > 500:
         file_outline = file_outline[:497] + "..."
+
+    ids = []
+    documents = []
+    metadatas = []
 
     for chunk in chunks:
         summary = _generate_summary(chunk["content"], chunk["heading"])
@@ -187,7 +197,16 @@ def index_file(
             "last_modified": last_modified,
         })
 
-    collection.add(ids=ids, documents=documents, metadatas=metadatas)
+    # Remove old chunks only immediately before adding new ones.
+    # If collection.add() fails (e.g. embedding error on a single chunk),
+    # catch and log -- do NOT let one bad file crash the entire sync.
+    try:
+        remove_file(filename, source)
+        collection.add(ids=ids, documents=documents, metadatas=metadatas)
+    except Exception as e:
+        log.warning("KB index: failed to index %s [%s]: %s", filename, source, e)
+        return 0
+
     log.info("KB index: indexed %d chunks from %s [%s]", len(ids), filename, source)
     return len(ids)
 
@@ -285,13 +304,18 @@ def search_kb(query: str, top_k: int = 10) -> list[dict]:
 def sync_kb_index() -> dict[str, int]:
     """Sync the KB vector index with files on disk.
 
-    Scans both knowledge/ and knowledge_canon/ directories. Re-indexes
-    files whose mtime has changed. Removes index entries for deleted files.
+    Uses a local JSON manifest (data/kb_manifest.json) for mtime tracking
+    instead of querying ChromaDB metadata. Faster, reliable across ChromaDB
+    versions. Re-indexes files whose mtime changed. Removes entries for
+    deleted files.
 
     Returns {"indexed": N, "removed": M}.
     """
     indexed = 0
     removed = 0
+    manifest = _load_manifest()
+    collection = _get_kb_collection()
+    collection_empty = collection.count() == 0
 
     for source, base_dir in [("knowledge", _KNOWLEDGE_DIR), ("canon", _CANON_DIR)]:
         if not base_dir.exists():
@@ -305,39 +329,29 @@ def sync_kb_index() -> dict[str, int]:
                 continue
             disk_files[rel] = path.stat().st_mtime
 
-        # Get indexed files from ChromaDB
-        collection = _get_kb_collection()
-        total = collection.count()
-        if total > 0:
-            all_docs = collection.get(
-                where={"source": source},
-                include=["metadatas"],
-            )
-            # Build map of filename -> max mtime from indexed chunks
-            indexed_mtimes: dict[str, float] = {}
-            indexed_ids_by_file: dict[str, list[str]] = {}
-            for i, doc_id in enumerate(all_docs["ids"]):
-                meta = all_docs["metadatas"][i]
-                fn = meta["filename"]
-                mt = meta.get("mtime", 0.0)
-                indexed_mtimes[fn] = max(indexed_mtimes.get(fn, 0.0), mt)
-                indexed_ids_by_file.setdefault(fn, []).append(doc_id)
-        else:
-            indexed_mtimes = {}
-            indexed_ids_by_file = {}
-
-        # Index new or changed files
+        # Index new or changed files (mtime check against manifest)
         for filename, mtime in disk_files.items():
-            existing_mtime = indexed_mtimes.get(filename)
-            if existing_mtime is None or abs(mtime - existing_mtime) > 0.5:
+            key = f"{source}/{filename}"
+            manifest_mtime = manifest.get(key)
+            disk_mtime = int(mtime)
+
+            if collection_empty or manifest_mtime is None or disk_mtime != manifest_mtime:
                 count = index_file(filename, source, base_dir=base_dir)
                 indexed += count
+                if count > 0:
+                    manifest[key] = disk_mtime
 
         # Remove entries for deleted files
-        for filename in indexed_ids_by_file:
-            if filename not in disk_files:
-                count = remove_file(filename, source)
-                removed += count
+        prefix = f"{source}/"
+        for key in list(manifest.keys()):
+            if key.startswith(prefix):
+                filename = key[len(prefix):]
+                if filename not in disk_files:
+                    remove_file(filename, source)
+                    removed += 1
+                    del manifest[key]
+
+    _save_manifest(manifest)
 
     # Unload e2b after batch indexing to free VRAM
     if indexed > 0:

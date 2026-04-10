@@ -7,6 +7,7 @@ chat (WebSocket), and the web UI as static files.
 
 import asyncio
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent.config import API_TOKEN, CHAT_MODEL, KNOWLEDGE_CANON_PATH, NUM_CTX, VOICE_MODEL, UI_DIR, PROJECT_OUTPUTS_PATH
+from agent.config import (
+    API_TOKEN, EFFECTIVE_CHAT_MODEL, EFFECTIVE_KB_REFINE_MODEL, EFFECTIVE_VOICE_MODEL,
+    KNOWLEDGE_CANON_PATH, NUM_CTX, UI_DIR, PROJECT_OUTPUTS_PATH,
+)
 from bridge.api_models import (
     ClaudeMdGenerateRequest,
     ClaudeMdGenerateResponse,
@@ -44,6 +48,14 @@ _PRIVACY_EXCLUDE = ["private", "secret"]
 _MAX_BODY_BYTES = 1_048_576  # 1 MB
 
 
+def _ts() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def _phase(label: str, t0: float) -> None:
+    print(f"  [{_ts()}] {label} ({time.time() - t0:.1f}s)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle. Validates config, inits agents and voice."""
@@ -52,34 +64,58 @@ async def lifespan(app: FastAPI):
     if len(API_TOKEN) < 32:
         raise RuntimeError("API_TOKEN must be at least 32 characters")
 
-    # Initialize entity registry
+    from agent.runtime_config import get_provider
+    boot_start = time.time()
+    provider = get_provider()
+    print(f"\n[{_ts()}] Agent Zero starting -- provider={provider}")
+    print(f"  chat={EFFECTIVE_CHAT_MODEL}  voice={EFFECTIVE_VOICE_MODEL}  kb={EFFECTIVE_KB_REFINE_MODEL}")
+
+    t = time.time()
     from memory.entity_registry import init_db as init_entity_db
     init_entity_db()
+    _phase("entity registry", t)
 
-    # Init agents (chat + voice) with async checkpointer
+    t = time.time()
     from agent.agent import create_async_agent
     from bridge.chat import init_agents, set_voice_ready
+    chat_agent, checkpointer = await create_async_agent(model=EFFECTIVE_CHAT_MODEL, skip_kb_index=True)
+    _phase(f"chat agent ({EFFECTIVE_CHAT_MODEL})", t)
 
-    chat_agent, checkpointer = await create_async_agent(model=CHAT_MODEL)
-    voice_agent, _ = await create_async_agent(model=VOICE_MODEL)
+    t = time.time()
+    voice_agent, _ = await create_async_agent(model=EFFECTIVE_VOICE_MODEL, skip_kb_index=True)
+    _phase(f"voice agent ({EFFECTIVE_VOICE_MODEL})", t)
+
+    # KB indexing runs in background -- does not block startup
+    async def _kb_index_bg() -> None:
+        from knowledge.kb_index import sync_kb_index
+        t0 = time.time()
+        print(f"  [{_ts()}] KB index starting...")
+        try:
+            result = await asyncio.to_thread(sync_kb_index)
+            print(f"  [{_ts()}] KB index done -- {result} ({time.time() - t0:.1f}s)")
+        except Exception as e:
+            print(f"  [{_ts()}] KB index failed: {e}")
+
+    asyncio.create_task(_kb_index_bg())
+
     init_agents(chat_agent, voice_agent, checkpointer)
 
-    # Preload and warm Whisper-MLX (in thread -- GPU-bound)
+    t = time.time()
     try:
         from voice.stt import load_whisper, warm_up
         await asyncio.to_thread(load_whisper)
         await asyncio.to_thread(warm_up)
         set_voice_ready(True)
+        _phase("whisper loaded", t)
     except Exception as e:
-        print(f"Warning: voice subsystem failed to load: {e}")
+        print(f"  [{_ts()}] whisper unavailable: {e}")
         set_voice_ready(False)
 
     from agent.config import API_PORT
-    print(f"Agent Zero ready -- UI at http://127.0.0.1:{API_PORT}/")
+    print(f"[{_ts()}] ready in {time.time() - boot_start:.1f}s -- http://127.0.0.1:{API_PORT}/\n")
 
     yield
 
-    # Shutdown: close async checkpointer
     if checkpointer and hasattr(checkpointer, "conn"):
         await checkpointer.conn.close()
 
@@ -314,6 +350,30 @@ async def generate_claude_md_endpoint(
         project_name=req.project_name,
         content=content,
     )
+
+
+@app.get("/config")
+async def get_config(_: str = Depends(verify_token)):
+    """Return active provider and model names."""
+    from agent.runtime_config import get_provider
+    return {
+        "provider": get_provider(),
+        "models": {
+            "fast": EFFECTIVE_CHAT_MODEL,
+            "heavy": EFFECTIVE_KB_REFINE_MODEL,
+        },
+    }
+
+
+@app.post("/config")
+async def update_config(body: dict, _: str = Depends(verify_token)):
+    """Switch the active provider between 'local' and 'cloud'."""
+    from agent.runtime_config import get_provider, set_provider
+    provider = body.get("provider")
+    if provider not in ("local", "cloud"):
+        raise HTTPException(status_code=400, detail="provider must be 'local' or 'cloud'")
+    set_provider(provider)
+    return {"provider": get_provider()}
 
 
 @app.post("/bridge/claude-md/write", response_model=ClaudeMdWriteResponse)

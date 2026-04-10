@@ -45,6 +45,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); }
   });
   micBtn.addEventListener('click', toggleMic);
+  document.getElementById('provider-btn').addEventListener('click', toggleProvider);
+  document.getElementById('agent-select').addEventListener('change', () => {
+    // Refresh model label when agent mode changes
+    const stored = localStorage.getItem('az_models');
+    if (stored) {
+      try { applyProvider(null, JSON.parse(stored)); } catch { /* ignore */ }
+    }
+  });
 });
 
 // -- Auth --
@@ -92,6 +100,7 @@ function setConnected(state) {
     ctxBar.classList.remove('hidden');
     statusDot.className = 'dot dot-connected';
     statusDot.title = 'Connected';
+    loadProvider();
   } else {
     tokenInput.classList.remove('hidden');
     connectBtn.classList.remove('hidden');
@@ -102,6 +111,49 @@ function setConnected(state) {
     statusDot.title = 'Disconnected';
     updateCtxBar(0);
   }
+}
+
+// -- Provider toggle --
+
+async function loadProvider() {
+  try {
+    const resp = await fetch('/config', { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) return;
+    const { provider, models } = await resp.json();
+    applyProvider(provider, models);
+  } catch { /* ignore -- non-critical */ }
+}
+
+function applyProvider(provider, models) {
+  const btn = document.getElementById('provider-btn');
+  const label = document.getElementById('model-label');
+  if (provider) {
+    btn.textContent = provider.toUpperCase();
+    btn.className = `provider-${provider}`;
+    localStorage.setItem('az_provider', provider);
+  }
+  if (models) {
+    localStorage.setItem('az_models', JSON.stringify(models));
+    const agentMode = document.getElementById('agent-select').value || 'fast';
+    label.textContent = models[agentMode] || '';
+  }
+}
+
+async function toggleProvider() {
+  const btn = document.getElementById('provider-btn');
+  const current = btn.classList.contains('provider-cloud') ? 'cloud' : 'local';
+  const next = current === 'cloud' ? 'local' : 'cloud';
+  try {
+    const resp = await fetch('/config', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ provider: next }),
+    });
+    if (resp.ok) applyProvider(next, null);
+  } catch { /* ignore */ }
 }
 
 function updateCtxBar(promptTokens) {

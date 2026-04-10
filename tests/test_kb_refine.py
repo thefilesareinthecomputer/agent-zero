@@ -47,7 +47,7 @@ class TestRefineKbDraft:
         with (
             patch("bridge.models.swap_for_kb", new_callable=AsyncMock) as mock_swap,
             patch("bridge.models.swap_back_from_kb", new_callable=AsyncMock) as mock_swap_back,
-            patch("agent.kb_refine.ChatOllama", return_value=mock_llm),
+            patch("agent.kb_refine.make_chat_ollama", return_value=mock_llm),
             patch.object(kb_refine, "_kb_save", return_value="/tmp/test.md") as mock_save,
             patch.object(kb_refine, "_index_file") as mock_index,
         ):
@@ -76,7 +76,7 @@ class TestRefineKbDraft:
         with (
             patch("bridge.models.swap_for_kb", new_callable=AsyncMock),
             patch("bridge.models.swap_back_from_kb", new_callable=AsyncMock),
-            patch("agent.kb_refine.ChatOllama", return_value=mock_llm),
+            patch("agent.kb_refine.make_chat_ollama", return_value=mock_llm),
             patch.object(kb_refine, "_kb_save", return_value="/tmp/test.md") as mock_save,
             patch.object(kb_refine, "_index_file"),
         ):
@@ -99,7 +99,7 @@ class TestRefineKbDraft:
         with (
             patch("bridge.models.swap_for_kb", new_callable=AsyncMock),
             patch("bridge.models.swap_back_from_kb", new_callable=AsyncMock) as mock_swap_back,
-            patch("agent.kb_refine.ChatOllama", return_value=mock_llm),
+            patch("agent.kb_refine.make_chat_ollama", return_value=mock_llm),
             patch.object(kb_refine, "_kb_save", return_value="/tmp/test.md") as mock_save,
             patch.object(kb_refine, "_index_file"),
         ):
@@ -126,7 +126,7 @@ class TestRefineKbDraftSync:
         with (
             patch("bridge.models.sync_swap_for_kb") as mock_swap,
             patch("bridge.models.sync_swap_back_from_kb") as mock_swap_back,
-            patch("agent.kb_refine.ChatOllama", return_value=mock_llm),
+            patch("agent.kb_refine.make_chat_ollama", return_value=mock_llm),
             patch.object(kb_refine, "_kb_save", return_value="/tmp/test.md") as mock_save,
             patch.object(kb_refine, "_index_file"),
         ):
@@ -153,7 +153,7 @@ class TestRefineKbDraftSync:
         with (
             patch("bridge.models.sync_swap_for_kb"),
             patch("bridge.models.sync_swap_back_from_kb") as mock_swap_back,
-            patch("agent.kb_refine.ChatOllama", return_value=mock_llm),
+            patch("agent.kb_refine.make_chat_ollama", return_value=mock_llm),
             patch.object(kb_refine, "_kb_save", return_value="/tmp/test.md") as mock_save,
             patch.object(kb_refine, "_index_file"),
         ):

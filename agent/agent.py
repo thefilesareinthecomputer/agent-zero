@@ -4,13 +4,13 @@ import sqlite3
 from pathlib import Path
 
 from langchain_core.messages import SystemMessage
-from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import create_react_agent
 
 from agent.config import (
-    AGENT_DB_PATH, MAIN_MODEL, NUM_CTX, NUM_PREDICT, OLLAMA_BASE_URL,
+    AGENT_DB_PATH, MAIN_MODEL, NUM_CTX, NUM_PREDICT,
 )
+from agent.llm import make_chat_ollama
 from knowledge.tokenizer import estimate_gemma_tokens as _estimate_gemma_tokens
 from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
@@ -249,11 +249,13 @@ def _build_prompt(state: dict) -> list:
 def create_agent(
     model: str | None = None,
     db_path: str | None = None,
+    skip_kb_index: bool = False,
 ) -> tuple:
     """Create the LangGraph ReAct agent with SQLite checkpointing.
 
     Returns (agent, checkpointer). Caller should close checkpointer.conn
-    when done.
+    when done. Pass skip_kb_index=True when the caller handles KB indexing
+    externally (e.g. in a background thread).
     """
     model = model or MAIN_MODEL
     db_path = db_path or AGENT_DB_PATH
@@ -261,17 +263,13 @@ def create_agent(
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     # Sync KB vector index with files on disk
-    try:
-        sync_kb_index()
-    except Exception:
-        pass  # KB index failure should not block agent startup
+    if not skip_kb_index:
+        try:
+            sync_kb_index()
+        except Exception:
+            pass  # KB index failure should not block agent startup
 
-    llm = ChatOllama(
-        model=model,
-        base_url=OLLAMA_BASE_URL,
-        num_ctx=NUM_CTX,
-        num_predict=NUM_PREDICT,
-    )
+    llm = make_chat_ollama(model=model, num_ctx=NUM_CTX, num_predict=NUM_PREDICT)
 
     conn = sqlite3.connect(db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
@@ -289,6 +287,8 @@ def create_agent(
 async def create_async_agent(
     model: str | None = None,
     db_path: str | None = None,
+    skip_kb_index: bool = False,
+    checkpointer=None,
 ) -> tuple:
     """Create the LangGraph ReAct agent with async SQLite checkpointing.
 
@@ -296,7 +296,11 @@ async def create_async_agent(
     agent.astream() works natively in async handlers.
 
     Returns (agent, checkpointer). Caller should await checkpointer.conn.close()
-    when done.
+    when done. Pass skip_kb_index=True when the caller handles KB indexing
+    externally (e.g. run once before creating multiple agents).
+
+    Pass checkpointer to reuse an existing AsyncSqliteSaver (e.g. when
+    recreating an agent after a provider toggle, preserving conversation state).
     """
     import aiosqlite
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -308,20 +312,17 @@ async def create_async_agent(
 
     # Sync KB vector index with files on disk
     import asyncio
-    try:
-        await asyncio.to_thread(sync_kb_index)
-    except Exception:
-        pass  # KB index failure should not block agent startup
+    if not skip_kb_index:
+        try:
+            await asyncio.to_thread(sync_kb_index)
+        except Exception:
+            pass  # KB index failure should not block agent startup
 
-    llm = ChatOllama(
-        model=model,
-        base_url=OLLAMA_BASE_URL,
-        num_ctx=NUM_CTX,
-        num_predict=NUM_PREDICT,
-    )
+    llm = make_chat_ollama(model=model, num_ctx=NUM_CTX, num_predict=NUM_PREDICT)
 
-    conn = await aiosqlite.connect(db_path)
-    checkpointer = AsyncSqliteSaver(conn)
+    if checkpointer is None:
+        conn = await aiosqlite.connect(db_path)
+        checkpointer = AsyncSqliteSaver(conn)
 
     agent = create_react_agent(
         model=llm,

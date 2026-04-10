@@ -7,9 +7,18 @@ import re
 
 import ollama
 
-from agent.config import FAST_MODEL, OLLAMA_BASE_URL
+from agent.config import EFFECTIVE_FAST_MODEL
+from agent import runtime_config as _runtime_config
 
 _client: ollama.Client | None = None
+
+
+def _reset_client() -> None:
+    global _client
+    _client = None
+
+
+_runtime_config.register_on_change(_reset_client)
 
 CATEGORIES = {
     "user-preference": "favorites, likes, dislikes, tastes, preferences",
@@ -71,10 +80,11 @@ Answer with ONLY "YES" or "NO".
 
 
 def _get_client() -> ollama.Client:
-    """Lazy-init Ollama client."""
+    """Lazy-init Ollama client. Re-creates on provider change."""
     global _client
     if _client is None:
-        _client = ollama.Client(host=OLLAMA_BASE_URL)
+        from agent.llm import make_ollama_client
+        _client = make_ollama_client()
     return _client
 
 
@@ -98,7 +108,7 @@ def tag_message(user_msg: str) -> dict[str, str]:
         client = _get_client()
         prompt = _TAG_PROMPT.format(user_msg=user_msg)
         response = client.chat(
-            model=FAST_MODEL,
+            model=EFFECTIVE_FAST_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"num_predict": 100},
         )
@@ -151,7 +161,7 @@ def check_novelty(new_msg: str, existing_memories: list[str]) -> bool:
             new_msg=new_msg,
         )
         response = client.chat(
-            model=FAST_MODEL,
+            model=EFFECTIVE_FAST_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"num_predict": 20},
         )

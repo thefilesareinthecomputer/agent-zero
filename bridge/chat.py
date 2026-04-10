@@ -16,7 +16,8 @@ log = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from agent.config import API_TOKEN, CHAT_MODEL, KB_REFINE_MODEL
+from agent.config import API_TOKEN
+from agent import runtime_config as _rc
 from bridge.api_models import ChatRequest
 from bridge.models import ensure_model
 from memory.memory_manager import store_exchange
@@ -27,11 +28,12 @@ router = APIRouter()
 
 # -- Shared state (initialized by lifespan in api.py) --
 
-_chat_agent = None      # gemma4:e4b -- main interaction
-_heavy_agent = None     # gemma4:26b -- lazy-created on first use
-_voice_agent = None     # gemma4:e4b -- voice pipeline
+_chat_agent = None      # fast model -- main interaction
+_heavy_agent = None     # kb-refine model -- lazy-created on first use
+_voice_agent = None     # voice model -- voice pipeline
 _checkpointer = None    # shared AsyncSqliteSaver
 _lock = asyncio.Lock()  # serializes agent access
+_agent_init_lock = asyncio.Lock()  # guards lazy agent creation
 _voice_ready = False    # set True after Whisper/VAD loaded
 
 
@@ -43,12 +45,56 @@ def init_agents(chat_agent, voice_agent, checkpointer):
     _checkpointer = checkpointer
 
 
+def _invalidate_agents():
+    """Invalidate cached agents so they are recreated with the new provider."""
+    global _chat_agent, _voice_agent, _heavy_agent
+    _chat_agent = None
+    _voice_agent = None
+    _heavy_agent = None
+
+
+_rc.register_on_change(_invalidate_agents)
+
+
+async def _get_chat_agent():
+    """Return the chat agent, recreating it if invalidated after a provider toggle."""
+    global _chat_agent
+    if _chat_agent is None:
+        async with _agent_init_lock:
+            if _chat_agent is None:
+                from agent.agent import create_async_agent
+                model = _rc.get_effective_model("chat")
+                _chat_agent, _ = await create_async_agent(
+                    model=model, checkpointer=_checkpointer, skip_kb_index=True
+                )
+    return _chat_agent
+
+
+async def _get_voice_agent():
+    """Return the voice agent, recreating it if invalidated after a provider toggle."""
+    global _voice_agent
+    if _voice_agent is None:
+        async with _agent_init_lock:
+            if _voice_agent is None:
+                from agent.agent import create_async_agent
+                model = _rc.get_effective_model("voice")
+                _voice_agent, _ = await create_async_agent(
+                    model=model, checkpointer=_checkpointer, skip_kb_index=True
+                )
+    return _voice_agent
+
+
 async def _get_heavy_agent():
-    """Lazy-create the 26b agent on first use. Cached for reuse."""
+    """Lazy-create the kb-refine agent on first use. Recreated on provider toggle."""
     global _heavy_agent
     if _heavy_agent is None:
-        from agent.agent import create_async_agent
-        _heavy_agent, _ = await create_async_agent(model=KB_REFINE_MODEL)
+        async with _agent_init_lock:
+            if _heavy_agent is None:
+                from agent.agent import create_async_agent
+                model = _rc.get_effective_model("kb_refine")
+                _heavy_agent, _ = await create_async_agent(
+                    model=model, checkpointer=_checkpointer, skip_kb_index=True
+                )
     return _heavy_agent
 
 
@@ -138,11 +184,6 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
     yield "done", {"full_response": full_response}
 
 
-# -- Model name mapping for SSE session event --
-
-_model_names = {"fast": CHAT_MODEL, "heavy": KB_REFINE_MODEL}
-
-
 # -- POST /chat (SSE text) --
 
 @router.post("/chat")
@@ -156,10 +197,10 @@ async def chat(
 
     if agent_key == "heavy":
         agent = await _get_heavy_agent()
-        model_name = KB_REFINE_MODEL
+        model_name = _rc.get_effective_model("kb_refine")
     else:
-        agent = _chat_agent
-        model_name = CHAT_MODEL
+        agent = await _get_chat_agent()
+        model_name = _rc.get_effective_model("chat")
 
     if _lock.locked():
         raise HTTPException(status_code=429, detail="Agent busy")
@@ -195,6 +236,28 @@ async def chat(
                 )
             except Exception:
                 pass  # memory failure should not break chat
+
+            # Log turn to training data JSONL for fine-tuning pipeline.
+            # Skip when running under pytest -- tests use tmp_path isolation
+            # in test_capture.py but chat integration tests must not write
+            # to the real data/training_logs/ directory.
+            import os as _os
+            if not _os.getenv("PYTEST_CURRENT_TEST"):
+                try:
+                    from fine_tuning.capture import log_turn
+                    await asyncio.to_thread(
+                        log_turn,
+                        session_id,
+                        _rc.get_provider(),
+                        model_name,
+                        agent_key,
+                        [
+                            {"role": "user", "content": body.message},
+                            {"role": "assistant", "content": full_response},
+                        ],
+                    )
+                except Exception:
+                    pass  # training log failure must not break chat
 
     return StreamingResponse(
         event_stream(),
@@ -357,10 +420,11 @@ async def _process_voice_query(
     """Run agent on voice query, stream response, then TTS."""
     full_response = ""
 
+    voice_agent = await _get_voice_agent()
     async with _lock:
         try:
             async for event_type, data in _stream_agent(
-                _voice_agent, query, session_id
+                voice_agent, query, session_id
             ):
                 await _ws_send(websocket, event_type, data)
                 if event_type == "done":

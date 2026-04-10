@@ -118,7 +118,7 @@ This configuration runs the 26B MoE main model, 2B tagger, voice model, and Whis
                           ┌────┴────┐
                  ┌────────┤         ├────────┐
                  │        └─────────┘        │
-        ┌────────┴────────┐        ┌─────────┴──────-───┐
+        ┌────────┴────────┐        ┌─────────┴──────────┐
         │   Agent Zero    │        │   Claude Code      │
         │  (always-on)    │        │   (user-driven)    │
         │                 │        │                    │
@@ -193,7 +193,7 @@ agent-zero/
 │   └── models.py                 # Model lifecycle -- VRAM management, swap for KB
 ├── knowledge/
 │   ├── knowledge_store.py        # Markdown KB: list, read, save, search, tag filter
-│   ├── kb_index.py               # ChromaDB semantic search, LLM summaries, mtime sync
+│   ├── kb_index.py               # ChromaDB semantic search, LLM summaries, JSON mtime manifest
 │   ├── chunker.py                # Section-based markdown chunking (H1-H5), heading tree
 │   └── tokenizer.py              # Token counting via tiktoken cl100k_base
 ├── memory/
@@ -341,6 +341,7 @@ CLI thread commands: `new` (start fresh thread), `quit`
 | Embedding upgrade + memory compression | done | nomic-embed-text (8192 tokens, 768 dims), memory summaries, grouped KB discovery |
 | Soft decay + entity registry | done | Additive recency tiebreaker, SQLite entity store with LLM extraction, token architecture fix |
 | Conditional prompt + snapshot | done | Split system prompt (core always, KB conditional), snapshot_to_knowledge tool, 378 tests passing |
+| KB index manifest + cloud routing | done | JSON mtime manifest (fixes re-index on every boot), cloud-aware KB summaries |
 
 ---
 
@@ -352,7 +353,7 @@ CLI thread commands: `new` (start fresh thread), `quit`
 
 **Web research** -- agent-launched browsing and scraping, pulling discovered material into the knowledge base. Local-first only (Firecrawl self-hosted, Crawl4AI).
 
-**KB indexing performance** -- first boot after adding large files is slow: LLM summaries are generated serially, one `e2b` inference call per chunk (~1-2s each). A 100K-word batch produces 70+ chunks -- 70-140 seconds just for summaries. Fix: generate mechanical summaries at boot for immediate startup, upgrade to LLM summaries in a background thread after the agent is responsive.
+**KB indexing performance** -- first boot after adding large files is slow: LLM summaries are generated serially, one inference call per chunk (~1-2s each). A 100K-word batch produces 70+ chunks -- 70-140 seconds just for summaries. Unchanged files are now skipped via a local JSON mtime manifest (`data/kb_manifest.json`), so routine boots add zero indexing overhead. Remaining improvement: generate mechanical summaries at boot for immediate startup, upgrade to LLM summaries in a background thread.
 
 
 ---

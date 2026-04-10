@@ -17,6 +17,13 @@ from agent.agent import create_agent
 from agent.config import OLLAMA_BASE_URL
 
 
+@pytest.fixture(autouse=True)
+def _force_local_provider(monkeypatch):
+    """Integration tests always use local Ollama regardless of .env provider setting."""
+    import agent.runtime_config as rc
+    monkeypatch.setattr(rc, "_provider", "local")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -55,7 +62,7 @@ _requires_ollama = pytest.mark.skipif(
 def agent_pair(tmp_path):
     """Create a real agent with e2b model and temp SQLite DB."""
     db_path = str(tmp_path / "test_agent.db")
-    agent, checkpointer = create_agent(model="gemma4:e2b", db_path=db_path)
+    agent, checkpointer = create_agent(model="gemma4:e2b", db_path=db_path, skip_kb_index=True)
     yield agent, checkpointer
     checkpointer.conn.close()
 

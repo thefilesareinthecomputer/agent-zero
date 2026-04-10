@@ -7,9 +7,8 @@ version, and unloads 26b. Both async (web) and sync (CLI) variants.
 
 import logging
 
-from langchain_ollama import ChatOllama
-
-from agent.config import KB_REFINE_MODEL, NUM_CTX, OLLAMA_BASE_URL
+from agent.config import EFFECTIVE_KB_REFINE_MODEL, NUM_CTX
+from agent.llm import make_chat_ollama
 from knowledge.kb_index import index_file as _index_file
 from knowledge.knowledge_store import save_file as _kb_save
 
@@ -72,12 +71,7 @@ async def refine_kb_draft(
     await swap_for_kb()
 
     try:
-        llm = ChatOllama(
-            model=KB_REFINE_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            num_ctx=NUM_CTX,
-            num_predict=4096,
-        )
+        llm = make_chat_ollama(model=EFFECTIVE_KB_REFINE_MODEL, num_ctx=NUM_CTX, num_predict=4096)
         prompt = _build_prompt(filename, draft_content, instructions)
         response = await llm.ainvoke(prompt)
         refined_content = response.content.strip()
@@ -113,12 +107,7 @@ def refine_kb_draft_sync(
     sync_swap_for_kb()
 
     try:
-        llm = ChatOllama(
-            model=KB_REFINE_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            num_ctx=NUM_CTX,
-            num_predict=4096,
-        )
+        llm = make_chat_ollama(model=EFFECTIVE_KB_REFINE_MODEL, num_ctx=NUM_CTX, num_predict=4096)
         prompt = _build_prompt(filename, draft_content, instructions)
         response = llm.invoke(prompt)
         refined_content = response.content.strip()

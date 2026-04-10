@@ -1,12 +1,13 @@
 """Agent Zero CLI -- interactive loop with streaming responses and memory."""
 
 import sys
+import threading
 import uuid
 
 from pathlib import Path
 
 from agent.agent import create_agent
-from agent.config import CHAT_MODEL, KB_REFINE_MODEL, KNOWLEDGE_CANON_PATH
+from agent.config import EFFECTIVE_CHAT_MODEL, EFFECTIVE_KB_REFINE_MODEL, KNOWLEDGE_CANON_PATH
 from knowledge.knowledge_store import list_files as kb_list_files
 
 _CANON_DIR = Path(KNOWLEDGE_CANON_PATH)
@@ -29,6 +30,7 @@ def print_banner() -> None:
     print("  Memory:   'memories' = list recent, 'forget last' = delete last")
     print("            'forget all' = wipe memory")
     print("  Knowledge: 'knowledge' = list knowledge base files")
+    print("  Provider: 'local' / 'cloud' = toggle inference provider, 'provider' = show current")
     print()
 
 
@@ -88,17 +90,45 @@ def _handle_command(user_input: str) -> bool:
                 print(f"  {i}. {name}{source}  [{tags}]  modified: {f['last_modified']}")
         return True
 
+    if cmd in ("cloud", "local"):
+        from agent.runtime_config import get_provider, set_provider
+        set_provider(cmd)
+        print(f"  Provider: {get_provider()}")
+        return True
+
+    if cmd == "provider":
+        from agent.runtime_config import get_provider
+        print(f"  Provider: {get_provider()}")
+        return True
+
     return False
+
+
+def _run_kb_index_bg() -> None:
+    """Run KB indexing in a background thread. Prints result if anything changed."""
+    try:
+        from knowledge.kb_index import sync_kb_index
+        result = sync_kb_index()
+        if result.get("indexed") or result.get("removed"):
+            print(
+                f"\r  [KB index: {result['indexed']} indexed, "
+                f"{result['removed']} removed]"
+            )
+    except Exception:
+        pass
 
 
 def run_cli() -> None:
     print_banner()
 
     use_heavy = "--heavy" in sys.argv
-    model = KB_REFINE_MODEL if use_heavy else CHAT_MODEL
+    model = EFFECTIVE_KB_REFINE_MODEL if use_heavy else EFFECTIVE_CHAT_MODEL
     print(f"Loading agent ({model})...")
 
-    agent, checkpointer = create_agent(model=model)
+    # Run KB indexing in a background thread so the CLI prompt appears immediately.
+    threading.Thread(target=_run_kb_index_bg, daemon=True).start()
+
+    agent, checkpointer = create_agent(model=model, skip_kb_index=True)
 
     # Enforce memory capacity cap on startup
     pruned = prune()
@@ -171,6 +201,23 @@ def run_cli() -> None:
                 # Store the exchange in memory
                 if agent_response:
                     store_exchange(user_input, agent_response, thread_id)
+
+                    # Log turn to training data JSONL for fine-tuning pipeline.
+                    try:
+                        from agent.runtime_config import get_provider
+                        from fine_tuning.capture import log_turn
+                        log_turn(
+                            thread_id,
+                            get_provider(),
+                            model,
+                            "heavy" if use_heavy else "fast",
+                            [
+                                {"role": "user", "content": user_input},
+                                {"role": "assistant", "content": agent_response},
+                            ],
+                        )
+                    except Exception:
+                        pass  # training log failure must not break chat
 
             except KeyboardInterrupt:
                 print("\n(interrupted)")

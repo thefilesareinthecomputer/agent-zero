@@ -14,6 +14,9 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(models_mod, "_active_model", None)
     # Replace the module-level lock so tests don't share lock state
     monkeypatch.setattr(models_mod, "_swap_lock", asyncio.Lock())
+    # Ensure local provider so VRAM functions are not no-ops by default
+    import agent.runtime_config as rc
+    monkeypatch.setattr(rc, "_provider", "local")
 
 
 class TestEnsureModel:
@@ -86,3 +89,51 @@ class TestSyncSwap:
         with patch.object(models_mod, "sync_unload_model"):
             models_mod.sync_swap_back_from_kb()
         assert models_mod.get_active_model() == models_mod.CHAT_MODEL
+
+
+class TestCloudNoOps:
+    """All VRAM management functions must be no-ops in cloud mode."""
+
+    @pytest.fixture(autouse=True)
+    def _set_cloud(self, monkeypatch):
+        import agent.runtime_config as rc
+        monkeypatch.setattr(rc, "_provider", "cloud")
+
+    def test_ensure_model_is_noop(self):
+        with patch.object(models_mod, "_async_unload", new_callable=AsyncMock) as mock:
+            asyncio.run(models_mod.ensure_model("some-cloud-model"))
+            mock.assert_not_called()
+        # _active_model should not have changed
+        assert models_mod.get_active_model() is None
+
+    def test_unload_model_is_noop(self):
+        models_mod._active_model = "gemma4:e4b"
+        with patch.object(models_mod, "_async_unload", new_callable=AsyncMock) as mock:
+            asyncio.run(models_mod.unload_model("gemma4:e4b"))
+            mock.assert_not_called()
+        assert models_mod.get_active_model() == "gemma4:e4b"
+
+    def test_swap_for_kb_is_noop(self):
+        with patch.object(models_mod, "_async_unload", new_callable=AsyncMock) as mock:
+            asyncio.run(models_mod.swap_for_kb())
+            mock.assert_not_called()
+
+    def test_swap_back_from_kb_is_noop(self):
+        with patch.object(models_mod, "_async_unload", new_callable=AsyncMock) as mock:
+            asyncio.run(models_mod.swap_back_from_kb())
+            mock.assert_not_called()
+
+    def test_sync_unload_is_noop(self):
+        with patch("bridge.models._ollama_client.Client") as mock_cls:
+            models_mod.sync_unload_model("gemma4:e2b")
+            mock_cls.assert_not_called()
+
+    def test_sync_swap_for_kb_is_noop(self):
+        with patch.object(models_mod, "sync_unload_model") as mock:
+            models_mod.sync_swap_for_kb()
+            mock.assert_not_called()
+
+    def test_sync_swap_back_is_noop(self):
+        with patch.object(models_mod, "sync_unload_model") as mock:
+            models_mod.sync_swap_back_from_kb()
+            mock.assert_not_called()

@@ -16,6 +16,7 @@ import logging
 import ollama as _ollama_client
 
 from agent.config import CHAT_MODEL, KB_REFINE_MODEL, OLLAMA_BASE_URL
+from agent.runtime_config import is_cloud
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,10 @@ async def ensure_model(model_name: str) -> None:
 
     If a different model is currently active, unload it first via
     Ollama keep_alive=0. Safe to call repeatedly with the same model.
+    No-op in cloud mode (provider manages model lifecycle).
     """
+    if is_cloud():
+        return
     global _active_model
     async with _swap_lock:
         if _active_model and _active_model != model_name:
@@ -42,7 +46,9 @@ async def ensure_model(model_name: str) -> None:
 
 
 async def unload_model(model_name: str) -> None:
-    """Unload a specific model from Ollama VRAM. Best-effort."""
+    """Unload a specific model from Ollama VRAM. Best-effort. No-op in cloud mode."""
+    if is_cloud():
+        return
     global _active_model
     async with _swap_lock:
         await _async_unload(model_name)
@@ -54,7 +60,10 @@ async def swap_for_kb() -> None:
     """Swap from chat model (e4b) to KB refinement model (26b).
 
     Unloads e4b, sets 26b as active. Called before 26b inference.
+    No-op in cloud mode.
     """
+    if is_cloud():
+        return
     global _active_model
     async with _swap_lock:
         if _active_model and _active_model != KB_REFINE_MODEL:
@@ -67,7 +76,10 @@ async def swap_back_from_kb() -> None:
     """Swap from KB refinement model (26b) back to chat model (e4b).
 
     Unloads 26b, sets e4b as active. Called after 26b inference completes.
+    No-op in cloud mode.
     """
+    if is_cloud():
+        return
     global _active_model
     async with _swap_lock:
         await _async_unload(KB_REFINE_MODEL)
@@ -78,8 +90,10 @@ async def swap_back_from_kb() -> None:
 def sync_unload_model(model_name: str) -> None:
     """Sync variant of unload for use in non-async code (kb_index, tagger).
 
-    Uses the sync Ollama client directly.
+    Uses the sync Ollama client directly. No-op in cloud mode.
     """
+    if is_cloud():
+        return
     try:
         client = _ollama_client.Client(host=OLLAMA_BASE_URL)
         client.generate(model=model_name, prompt="", keep_alive=0)
@@ -89,7 +103,9 @@ def sync_unload_model(model_name: str) -> None:
 
 
 def sync_swap_for_kb() -> None:
-    """Sync variant of swap_for_kb for CLI context."""
+    """Sync variant of swap_for_kb for CLI context. No-op in cloud mode."""
+    if is_cloud():
+        return
     global _active_model
     if _active_model and _active_model != KB_REFINE_MODEL:
         sync_unload_model(_active_model)
@@ -98,7 +114,9 @@ def sync_swap_for_kb() -> None:
 
 
 def sync_swap_back_from_kb() -> None:
-    """Sync variant of swap_back_from_kb for CLI context."""
+    """Sync variant of swap_back_from_kb for CLI context. No-op in cloud mode."""
+    if is_cloud():
+        return
     global _active_model
     sync_unload_model(KB_REFINE_MODEL)
     _active_model = CHAT_MODEL
