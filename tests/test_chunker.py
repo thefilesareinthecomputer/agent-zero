@@ -137,13 +137,13 @@ class TestH1Splitting:
         assert chunks[0]["heading"] == "Chapter One"
         assert chunks[1]["heading"] == "Chapter Two"
 
-    def test_h1_detected_as_highest(self):
+    def test_h1_is_concept_boundary(self):
         body = (
             "# Top Level\n"
             "## Sub Section\nContent.\n"
         )
         chunks = chunk_file(_make_file(body), "test.md")
-        # Should split on H1, keeping H2 inside the content
+        # H1 is the concept unit -- H2-H5 live inside the H1 chunk.
         assert len(chunks) == 1
         assert chunks[0]["heading"] == "Top Level"
         assert "## Sub Section" in chunks[0]["content"]

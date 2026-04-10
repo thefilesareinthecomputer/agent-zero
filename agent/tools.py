@@ -1,5 +1,6 @@
 """Agent Zero tools -- @tool decorated functions for the ReAct agent."""
 
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +65,15 @@ def write_file(file_path: str, content: str) -> str:
         return f"Written {len(content)} chars to {file_path}"
     except Exception as e:
         return f"Error writing file: {e}"
+
+
+# -- Retrieval budget state (written by _build_prompt in agent.py each step) --
+_current_available_tokens: int = 999999
+_current_kb_loads: int = 0
+_KB_MAX_LOADS_PER_RESPONSE: int = 3
+
+# -- Snapshot state (written by _build_prompt each step) --
+_last_agent_response: str = ""
 
 
 # -- Knowledge base tools --
@@ -185,13 +195,15 @@ def read_knowledge(filename: str) -> str:
     tree_text = _format_heading_tree(tree) if tree else None
 
     if tree_text:
+        tree_cost = _estimate_gemma_tokens(tree_text)
         lines = [
             f"[{tok_count:,} tokens total]",
             "",
             tree_text,
             "",
-            "Use read_knowledge_section(filename, section_heading) "
-            "to load the sections you need.",
+            f"[Tree cost: ~{tree_cost:,} tokens. "
+            f"Each read_knowledge_section call costs additional tokens -- "
+            f"check subtree sizes above before loading.]",
         ]
         return "\n".join(lines)
 
@@ -206,9 +218,26 @@ def read_knowledge(filename: str) -> str:
 @tool
 def read_knowledge_section(filename: str, section: str) -> str:
     """Load a specific section from a knowledge base file. Use after
-    read_knowledge to load the sections you chose from the heading tree.
-    The section parameter should match a heading from the tree
-    (case-insensitive partial match)."""
+    read_knowledge to load a section you chose from the heading tree.
+
+    H1 headings are top-level concept boundaries -- passing an H1 heading
+    loads the full concept block (including all H2-H5 children).  Passing
+    an H2-H5 heading extracts just that subsection from within its parent H1.
+    The section parameter is a case-insensitive substring match against
+    any heading level.
+
+    This tool enforces retrieval limits. It will refuse to load if:
+    - You have already loaded 3 sections this response, or
+    - Available context is below 5,000 tokens."""
+    # -- Hard enforcement: retrieval limit and context cap --
+    if _current_kb_loads >= _KB_MAX_LOADS_PER_RESPONSE:
+        return (
+            f"REFUSED: Retrieval limit reached ({_KB_MAX_LOADS_PER_RESPONSE} "
+            f"sections loaded this response). Respond with what you have."
+        )
+    if _current_available_tokens < 5000:
+        return "REFUSED: Context budget too low to load more content. Respond with what you have."
+
     # Find the file
     _kb_dir = Path(KNOWLEDGE_PATH)
     path = _kb_dir / filename
@@ -225,18 +254,48 @@ def read_knowledge_section(filename: str, section: str) -> str:
     chunks = _chunk_file(raw, filename)
     section_lower = section.lower()
 
-    # Find matching section (case-insensitive contains)
+    # Pass 1: H1 concept heading match (case-insensitive substring)
     for chunk in chunks:
         if section_lower in chunk["heading"].lower():
             if chunk["token_count"] > KB_FILE_MAX_TOKENS:
                 truncated, _ = _truncate(chunk["content"], KB_FILE_MAX_TOKENS)
-                return truncated + f"\n\n[truncated -- section exceeds {KB_FILE_MAX_TOKENS} token limit]"
-            return chunk["content"]
+                tok = _estimate_gemma_tokens(truncated)
+                return truncated + f"\n\n[Loaded ~{tok:,} tokens (truncated)]"
+            tok = _estimate_gemma_tokens(chunk["content"])
+            return chunk["content"] + f"\n\n[Loaded ~{tok:,} tokens]"
+
+    # Pass 2: H2-H5 subsection extraction. Scans within each H1 chunk for a
+    # markdown heading matching the query and extracts from that heading to the
+    # next heading at the same or higher level.
+    heading_re = re.compile(r"^(#{1,6})\s+(.*)", re.MULTILINE)
+    for chunk in chunks:
+        lines = chunk["content"].split("\n")
+        for i, line in enumerate(lines):
+            m = heading_re.match(line)
+            if not m or section_lower not in m.group(2).lower():
+                continue
+            level = len(m.group(1))
+            extracted = [line]
+            for j in range(i + 1, len(lines)):
+                nm = re.match(r"^(#{1,6})\s", lines[j])
+                if nm and len(nm.group(1)) <= level:
+                    break
+                extracted.append(lines[j])
+            result = "\n".join(extracted).strip()
+            tok = _count_tokens(result)
+            if tok > KB_FILE_MAX_TOKENS:
+                result, _ = _truncate(result, KB_FILE_MAX_TOKENS)
+                est = _estimate_gemma_tokens(result)
+                return result + f"\n\n[Loaded ~{est:,} tokens (truncated)]"
+            est = _estimate_gemma_tokens(result)
+            return result + f"\n\n[Loaded ~{est:,} tokens]"
 
     available = [c["heading"] for c in chunks]
     return (
         f"Section '{section}' not found in {filename}.\n"
-        f"Available sections: {', '.join(available)}"
+        f"Available H1 concepts: {', '.join(available)}\n"
+        f"Pick one of these, or respond with what you already have. "
+        f"Do not guess section names."
     )
 
 
@@ -262,6 +321,10 @@ def search_knowledge(query: str) -> str:
                 lines.append(
                     f"   > {h['heading']} -- {h.get('summary', '')}"
                 )
+        lines.append(
+            f"\n[{len(hits)} files matched. Use read_knowledge to browse "
+            f"heading trees before loading sections.]"
+        )
         return "\n".join(lines)
 
     # Fallback to substring search if KB index is empty (first run)
@@ -347,6 +410,59 @@ async def draft_knowledge(
         return result
     except Exception as e:
         return f"Error drafting knowledge file: {e}"
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Convert text to a filename-safe slug."""
+    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:max_len]
+
+
+@tool
+def snapshot_to_knowledge(topic: str = "") -> str:
+    """Save your last response as a knowledge base file. Call this when the
+    user says 'snapshot', 'save that', 'save this', or asks to save your
+    last output. You do NOT need to reproduce the content -- it is captured
+    automatically. Just provide an optional short topic name."""
+    if not _last_agent_response or not _last_agent_response.strip():
+        return "Nothing to snapshot -- no prior response found."
+
+    content = _last_agent_response
+
+    # Generate filename
+    if topic:
+        filename = f"{_slugify(topic)}.md"
+    else:
+        m = re.search(r'^#{1,3}\s+(.+)', content, re.MULTILINE)
+        if m:
+            filename = f"{_slugify(m.group(1))}.md"
+        else:
+            filename = f"snapshot-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+
+    # Generate tags from topic or headings
+    if topic:
+        words = re.findall(r'[a-z]{3,}', topic.lower())
+        tags = [w for w in words if w not in ('the', 'and', 'for', 'with', 'from')][:5]
+    else:
+        headings = re.findall(r'^#{1,3}\s+(.+)', content, re.MULTILINE)
+        words = re.findall(r'[a-z]{3,}', ' '.join(headings).lower())
+        tags = [w for w in words if w not in ('the', 'and', 'for', 'with', 'from')][:5]
+    if not tags:
+        tags = ["snapshot"]
+
+    # Check for existing file with same name
+    if _is_canon_file(filename):
+        return f"Cannot save: {filename} is a canon file (read-only)."
+
+    try:
+        path = _kb_save(filename, content, tags)
+        try:
+            _index_file(filename, source="knowledge")
+        except Exception:
+            pass
+        tok = _estimate_gemma_tokens(content)
+        return f"Saved snapshot: {path} (~{tok:,} tokens, tags: {', '.join(tags)})"
+    except Exception as e:
+        return f"Error saving snapshot: {e}"
 
 
 # -- CLAUDE.md bridge tools --

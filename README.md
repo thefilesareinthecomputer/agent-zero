@@ -1,5 +1,19 @@
 # Agent Zero
 
+Save $ on AI and keep your knowledge base local.
+🤖agent-zero: a free, on-device LangGraph agent (Ollama + Gemma 4) with web UI, obsidian knowledge base read/write/RAG, and long-term conversation memory.
+🔌Designed to partner with CLAUDE Code - agent-zero assembles project context from your knowledge base into documentation and config files for Claude Code, saving on token / usage limits for project scaffolding
+👨🏻‍💻100% local - Agent Zero runs locally - no cloud, no subscriptions, no data leaving your machine
+💻Web UI - chatbot app with live context window tracking
+🗣️Voice chat - wake word detection, Whisper STT, macOS TTS - discuss a project idea with the agent while your hands are busy and turn rough ideas into clean documentation without touching your computer
+🔀Multi-model - 4B for chat, 26B for writing, 70B+ for reasoning, swap with a dropdown
+📚Three-step KB retrieval - semantic search, document header trees with token costs per doc section, the agent loads only what it needs from the data catalog and manages its context window using a running “token budget” for its context window
+🧠Multi-layered memory - deduplication, contradiction detection, LLM-based novelty filtering for recall
+📓Obsidian-compatible knowledge base the agent reads and writes, plus a sidecar read-only "canon" knowledge folder
+🔐REST API with bearer token auth
+
+![Agent Zero Web UI](static_assets/agent-zero-screenshot.png)
+
 A local AI agent built on LangGraph and Ollama. Persistent memory, a knowledge base, voice chat, and a web UI -- all running on your own hardware with no cloud dependencies.
 
 Designed to run alongside Claude Code: Agent Zero maintains project context in `CLAUDE.md` files that Claude Code reads automatically at session start. The two systems share a knowledge layer without any shared process or SDK dependency.
@@ -18,8 +32,6 @@ Designed to run alongside Claude Code: Agent Zero maintains project context in `
 - **Multi-model orchestration** -- e4b handles chat, e2b handles tagging, 26b loads on-demand for KB file creation (draft/refine pipeline) or manual toggle, then unloads immediately
 - **CLAUDE.md bridge** -- agent assembles project context from the knowledge base and writes it to any project directory for Claude Code to pick up
 - **REST API** -- localhost-only, bearer token auth, full CRUD on the knowledge base
-
-![Agent Zero Web UI](static_assets/agent-zero-screenshot.png)
 
 ---
 

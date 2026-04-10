@@ -291,17 +291,24 @@ def chunk_file(
     *,
     max_tokens: int | None = None,
 ) -> list[dict]:
-    """Chunk a knowledge file into sections for indexing.
+    """Chunk a knowledge file into H1-level concept sections for indexing.
+
+    H1 headings are first-class concept boundaries -- each H1 block becomes
+    one chunk.  H2-H5 headings are children of their parent H1 and remain
+    inside that chunk.  When max_tokens is set and an H1 chunk exceeds it,
+    the chunk is recursively split at H2 (then H3, etc.), then hard-split
+    at token boundaries if no sub-headings exist.
+
+    Files with no H1 fall back to H2 as the primary split level, then H3, etc.
+    Files with no headings at all produce a single chunk.
 
     Args:
         text: Raw file content (including frontmatter).
-        filename: The filename (used as fallback heading).
-        max_tokens: Optional per-chunk token limit. Sections exceeding
-            this are recursively split on sub-headings, then hard-split
-            at token boundaries if no sub-headings exist.
+        filename: The filename (used as fallback heading for headingless files).
+        max_tokens: Optional per-chunk token limit.
 
     Returns list of dicts, each with:
-        heading: str -- section heading (or filename for headingless files)
+        heading: str -- H1 section heading (or composite path for sub-splits)
         content: str -- section text
         chunk_index: int -- 0-based position in the file
         token_count: int -- token count of the content

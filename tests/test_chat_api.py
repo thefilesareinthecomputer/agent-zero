@@ -7,12 +7,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+# Set env before any config import so agent.config picks it up on first load.
+# But if config already loaded (test ordering), we also patch the live reference
+# in bridge.chat where it's actually used for auth checks.
 os.environ["API_TOKEN"] = "test-token-that-is-at-least-32-characters-long"
 
 from bridge.api import app  # noqa: E402
 
 TOKEN = os.environ["API_TOKEN"]
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def _patch_api_token():
+    """Ensure API_TOKEN is correct regardless of import order."""
+    with patch("bridge.chat.API_TOKEN", TOKEN):
+        yield
 
 
 @pytest.fixture

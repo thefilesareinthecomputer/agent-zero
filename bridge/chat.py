@@ -7,8 +7,11 @@ to memory after agent completion.
 
 import asyncio
 import json
+import logging
 import secrets
 import uuid
+
+log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -83,6 +86,7 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
     full_response = ""
     prompt_tokens = 0
     completion_tokens = 0
+    ai_msg_count = 0
 
     async for chunk in agent.astream(
         {"messages": messages}, config=config, stream_mode="updates"
@@ -92,6 +96,7 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
                 continue
             for msg in node_output["messages"]:
                 if msg.type == "ai":
+                    ai_msg_count += 1
                     meta = getattr(msg, "response_metadata", {}) or {}
                     if "prompt_eval_count" in meta:
                         prompt_tokens = meta["prompt_eval_count"]
@@ -106,6 +111,11 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
                     elif msg.content:
                         full_response += msg.content
                         yield "token", {"text": msg.content}
+                    else:
+                        log.warning(
+                            "[chat] Empty AI message (no content, no tool calls). "
+                            "msg_count=%d, user=%r", ai_msg_count, user_msg[:80]
+                        )
                 elif msg.type == "tool":
                     content = msg.content[:500] if msg.content else ""
                     yield "tool_result", {
@@ -118,6 +128,12 @@ async def _stream_agent(agent, user_msg: str, session_id: str):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
         }
+
+    if not full_response.strip() and ai_msg_count > 0:
+        log.warning(
+            "[chat] Agent produced %d AI messages but no text response. user=%r",
+            ai_msg_count, user_msg[:80],
+        )
 
     yield "done", {"full_response": full_response}
 
@@ -169,10 +185,14 @@ async def chat(
                 yield _sse_event("error", {"message": str(e)})
                 return
 
-        # Store exchange to memory (outside lock)
+        # Store exchange to memory in a background thread so it doesn't
+        # block the event loop.  store_exchange is sync (calls e2b for
+        # tagging + summary) and can take several seconds.
         if full_response:
             try:
-                store_exchange(body.message, full_response, session_id)
+                await asyncio.to_thread(
+                    store_exchange, body.message, full_response, session_id
+                )
             except Exception:
                 pass  # memory failure should not break chat
 
@@ -351,10 +371,10 @@ async def _process_voice_query(
             await _ws_send(websocket, "state", {"state": "listening"})
             return
 
-    # Store exchange to memory
+    # Store exchange to memory in background thread (sync function, blocks event loop)
     if full_response:
         try:
-            store_exchange(query, full_response, session_id)
+            await asyncio.to_thread(store_exchange, query, full_response, session_id)
         except Exception:
             pass
 

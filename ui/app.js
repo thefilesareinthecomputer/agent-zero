@@ -28,6 +28,9 @@ let workletNode = null;
 let mediaStream = null;
 let ctxSize = 16384;
 
+// Maps agentMsg element -> [{name, card, done}] for tool call tracking
+const toolCallMap = new WeakMap();
+
 // -- Init --
 document.addEventListener('DOMContentLoaded', () => {
   if (token) {
@@ -150,13 +153,15 @@ async function onSend() {
     });
 
     if (resp.status === 429) {
-      agentMsg.textContent = '[Agent busy -- try again shortly]';
+      appendTextNode(agentMsg, '[Agent busy -- try again shortly]');
+      finalizeAgentMsg(agentMsg);
       setBusy(false);
       return;
     }
 
     if (!resp.ok) {
-      agentMsg.textContent = `[Error: ${resp.status}]`;
+      appendTextNode(agentMsg, `[Error: ${resp.status}]`);
+      finalizeAgentMsg(agentMsg);
       setBusy(false);
       return;
     }
@@ -185,9 +190,11 @@ async function onSend() {
       }
     }
   } catch (e) {
-    agentMsg.textContent = `[Connection error: ${e.message}]`;
+    appendTextNode(agentMsg, `[Connection error: ${e.message}]`);
   }
 
+  // Always finalize -- safety net if stream ended without a done event.
+  finalizeAgentMsg(agentMsg);
   setBusy(false);
 }
 
@@ -198,10 +205,10 @@ function handleSSEEvent(type, data, agentMsg) {
       if (data.model) agentMsg.querySelector('.message-label').textContent = `Agent Zero [${data.model}]`;
       break;
     case 'tool_call':
-      appendTool(agentMsg, `[calling ${data.name}...]`);
+      appendToolCall(agentMsg, data.name);
       break;
     case 'tool_result':
-      appendTool(agentMsg, `[${data.name}] ${data.content}`);
+      appendToolResult(agentMsg, data.name, data.content);
       break;
     case 'token':
       appendToken(agentMsg, data.text);
@@ -210,9 +217,11 @@ function handleSSEEvent(type, data, agentMsg) {
       updateCtxBar(data.prompt_tokens);
       break;
     case 'done':
+      finalizeAgentMsg(agentMsg);
       break;
     case 'error':
       appendToken(agentMsg, `\n[Error: ${data.message}]`);
+      finalizeAgentMsg(agentMsg);
       break;
   }
 }
@@ -329,18 +338,18 @@ function handleWsMessage(msg) {
     case 'tool_call': {
       let agentMsg = document.querySelector('.message-voice-agent.streaming');
       if (!agentMsg) agentMsg = createAgentMessage('voice');
-      appendTool(agentMsg, `[calling ${msg.name}...]`);
+      appendToolCall(agentMsg, msg.name);
       break;
     }
     case 'tool_result': {
       let agentMsg = document.querySelector('.message-voice-agent.streaming');
       if (!agentMsg) agentMsg = createAgentMessage('voice');
-      appendTool(agentMsg, `[${msg.name}] ${msg.content}`);
+      appendToolResult(agentMsg, msg.name, msg.content);
       break;
     }
     case 'done': {
       const el = document.querySelector('.message-voice-agent.streaming');
-      if (el) el.classList.remove('streaming');
+      if (el) finalizeAgentMsg(el);
       break;
     }
     case 'tts_start':
@@ -393,6 +402,109 @@ async function drainPlayback() {
   playing = false;
 }
 
+// -- Markdown renderer --
+// Handles: fenced code blocks, headings (h1-h4), bold, italic, inline code,
+// unordered/ordered lists, blockquotes, horizontal rules, paragraphs.
+
+function renderMarkdown(raw) {
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function inline(s) {
+    return esc(s)
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  }
+
+  const lines = raw.split('\n');
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    if (/^```/.test(line)) {
+      const lang = line.slice(3).trim();
+      const code = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        code.push(esc(lines[i]));
+        i++;
+      }
+      const langAttr = lang ? ` class="lang-${esc(lang)}"` : '';
+      out.push(`<pre><code${langAttr}>${code.join('\n')}</code></pre>`);
+      i++;
+      continue;
+    }
+
+    // Heading
+    const hm = line.match(/^(#{1,4})\s+(.*)/);
+    if (hm) {
+      out.push(`<h${hm[1].length}>${inline(hm[2])}</h${hm[1].length}>`);
+      i++; continue;
+    }
+
+    // Horizontal rule
+    if (/^---+\s*$/.test(line)) {
+      out.push('<hr>');
+      i++; continue;
+    }
+
+    // Blockquote
+    if (line.startsWith('> ')) {
+      const q = [];
+      while (i < lines.length && lines[i].startsWith('> ')) {
+        q.push(inline(lines[i].slice(2)));
+        i++;
+      }
+      out.push(`<blockquote>${q.join('<br>')}</blockquote>`);
+      continue;
+    }
+
+    // Unordered list
+    if (/^[-*+]\s/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
+        items.push(`<li>${inline(lines[i].replace(/^[-*+]\s/, ''))}</li>`);
+        i++;
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    // Ordered list
+    if (/^\d+[.)]\s/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+[.)]\s/.test(lines[i])) {
+        items.push(`<li>${inline(lines[i].replace(/^\d+[.)]\s/, ''))}</li>`);
+        i++;
+      }
+      out.push(`<ol>${items.join('')}</ol>`);
+      continue;
+    }
+
+    // Blank line
+    if (line.trim() === '') {
+      i++; continue;
+    }
+
+    // Paragraph -- collect consecutive non-block lines
+    const p = [];
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim() || /^[#>]/.test(l) || /^[-*+]\s/.test(l) ||
+          /^\d+[.)]\s/.test(l) || /^```/.test(l) || /^---+\s*$/.test(l)) break;
+      p.push(inline(l));
+      i++;
+    }
+    if (p.length) out.push(`<p>${p.join('<br>')}</p>`);
+  }
+
+  return out.join('');
+}
+
 // -- DOM helpers --
 
 function appendMessage(role, text) {
@@ -410,6 +522,7 @@ function appendMessage(role, text) {
   div.appendChild(label);
 
   const content = document.createElement('div');
+  content.className = 'message-body';
   content.textContent = text;
   div.appendChild(content);
 
@@ -438,28 +551,104 @@ function createAgentMessage(source = 'text') {
   return div;
 }
 
-function appendToken(agentMsg, text) {
+// Returns the last .agent-text child, or creates one if the last child is a
+// tool card (or if there are no children yet).
+function getOrCreateTextEl(agentMsg) {
   const content = agentMsg.querySelector('.agent-content');
-  if (content) {
-    content.textContent += text;
-  } else {
-    agentMsg.textContent += text;
+  const children = content.children;
+  if (children.length === 0 || children[children.length - 1].classList.contains('tool-card')) {
+    const el = document.createElement('div');
+    el.className = 'agent-text';
+    el.dataset.raw = '';
+    content.appendChild(el);
+    return el;
   }
+  return children[children.length - 1];
+}
+
+// Append a plain text node -- used for error/busy messages before finalization.
+function appendTextNode(agentMsg, text) {
+  const el = getOrCreateTextEl(agentMsg);
+  el.dataset.raw = (el.dataset.raw || '') + text;
+  el.textContent = el.dataset.raw;
+}
+
+function appendToken(agentMsg, text) {
+  const el = getOrCreateTextEl(agentMsg);
+  el.dataset.raw = (el.dataset.raw || '') + text;
+  el.textContent = el.dataset.raw;
   scrollToBottom();
 }
 
-function appendTool(agentMsg, text) {
-  const toolDiv = document.createElement('div');
-  toolDiv.className = 'tool-block';
-  toolDiv.textContent = text;
+// Render all .agent-text segments as markdown and remove streaming state.
+// Idempotent -- safe to call multiple times on the same message.
+function finalizeAgentMsg(agentMsg) {
+  if (!agentMsg.classList.contains('streaming')) return;
+  agentMsg.classList.remove('streaming');
+  agentMsg.querySelectorAll('.agent-text').forEach(el => {
+    const raw = el.dataset.raw || '';
+    if (raw.trim()) {
+      el.innerHTML = renderMarkdown(raw);
+      el.classList.add('rendered');
+    } else {
+      el.remove();
+    }
+  });
+}
+
+function appendToolCall(agentMsg, name) {
+  const card = document.createElement('div');
+  card.className = 'tool-card';
+  card.dataset.state = 'running';
+  card.innerHTML = `
+    <div class="tool-card-header">
+      <span class="tool-tag">fn</span>
+      <span class="tool-name">${escHtml(name)}</span>
+      <span class="tool-spacer"></span>
+      <span class="tool-status-badge"></span>
+      <span class="tool-chevron"></span>
+    </div>
+    <div class="tool-card-body">
+      <pre class="tool-output"></pre>
+    </div>
+  `;
+
+  if (!toolCallMap.has(agentMsg)) toolCallMap.set(agentMsg, []);
+  toolCallMap.get(agentMsg).push({ name, card, done: false });
 
   const content = agentMsg.querySelector('.agent-content');
-  if (content) {
-    content.appendChild(toolDiv);
-  } else {
-    agentMsg.appendChild(toolDiv);
-  }
+  content.appendChild(card);
   scrollToBottom();
+}
+
+function appendToolResult(agentMsg, name, resultContent) {
+  const calls = toolCallMap.get(agentMsg) || [];
+  const entry = [...calls].reverse().find(e => e.name === name && !e.done);
+  if (!entry) return;
+
+  entry.done = true;
+  const card = entry.card;
+  card.dataset.state = 'done';
+
+  const output = card.querySelector('.tool-output');
+  output.textContent = resultContent || '';
+
+  // Auto-expand short results; leave long ones collapsed.
+  const isShort = (resultContent || '').length < 200;
+  if (isShort) card.classList.add('expanded');
+
+  card.querySelector('.tool-card-header').addEventListener('click', () => {
+    card.classList.toggle('expanded');
+  });
+
+  scrollToBottom();
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function scrollToBottom() {

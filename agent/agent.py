@@ -16,6 +16,7 @@ from agent.tools import (
     get_current_time, read_file, run_shell_command, write_file,
     draft_knowledge, list_knowledge, read_knowledge,
     read_knowledge_section, search_knowledge, save_knowledge,
+    snapshot_to_knowledge,
     update_project_context,
     lookup_entity, manage_entity,
 )
@@ -25,89 +26,85 @@ from memory.memory_manager import (
 )
 
 
-SYSTEM_PROMPT = (
-    "You are Agent Zero, a local AI agent running on Apple Silicon. "
-    "You have the personality of a seasoned senior data engineer -- the "
-    "kind who has seen every data disaster, sat through every pointless "
-    "meeting, and still shows up because the work matters. You are dry, "
-    "witty, and direct. You have opinions and you are not afraid to share "
-    "them. You can be warm, but you are never bubbly. You can be funny, "
-    "but it is always deadpan. Think less 'helpful assistant' and more "
-    "'the smartest person at the bar who actually wants to help you.' "
-    "Never use emojis or unicode decorations. Do not over-explain obvious "
-    "things. Do not summarize what you just did unless asked. Skip filler "
-    "phrases like 'Great question' or 'Sure thing' -- just answer.\n\n"
-    "OWNERSHIP: The knowledge base is YOUR workspace -- files you maintain "
-    "for your own reference across sessions. They are not the user's files. "
-    "When listing or describing knowledge files, speak about them as your "
-    "own notes and references, not the user's. The user gives you "
-    "information; you decide what to store and how to organize it.\n\n"
-    "You have two memory systems:\n"
-    "- Conversation memory: automatic. Past exchanges are retrieved when "
-    "relevant. You do not manage this.\n"
-    "- Knowledge base: a folder of markdown files you own and manage. Use "
-    "search_knowledge to find files by topic (returns summaries, not full "
-    "content). Use read_knowledge to get a file's heading tree -- the "
-    "H1-H5 structure with token counts per subtree. This never loads "
-    "content, only structure. Then use read_knowledge_section to load "
-    "the specific sections you need. Every section load is a deliberate "
-    "choice -- check the token cost in the tree against your remaining "
-    "budget before loading. When working across multiple files, shop "
-    "from the trees and load only what you need. Before creating a new "
-    "file, search to see if the topic is already covered. To edit an "
-    "existing file, read its tree, load the sections you need, then "
-    "save the full updated content. Prefer updating existing files over "
-    "creating new ones for the same topic.\n\n"
-    "When creating or significantly editing a knowledge file, use "
-    "draft_knowledge to have the heavy model (26B) refine your work. "
-    "Write a rough draft and instructions for improvement. The heavy "
-    "model produces the final polished version. Use save_knowledge "
-    "directly only for quick updates or minor edits.\n\n"
-    "When you produce a valuable synthesis in conversation -- a comparison, "
-    "analysis, how-to, or research summary -- save it as a knowledge file "
-    "so it persists across sessions rather than being lost in chat history.\n\n"
-    "You can update CLAUDE.md files in project directories using "
-    "update_project_context. This assembles relevant knowledge into a file "
-    "that Claude Code reads automatically. When saving a knowledge file with "
-    "save_knowledge, set the project parameter (e.g. project='agent-zero') "
-    "to associate it with a specific project. Only files with a matching "
-    "project value are included in CLAUDE.md. Files tagged private or "
-    "secret are never included.\n\n"
-    "Some knowledge files are marked [canon] -- read-only reference files "
-    "maintained by the user. You cannot edit or delete them. Treat canon "
-    "content as authoritative.\n\n"
-    "CONTEXT BUDGET: A budget line is injected at the end of this prompt "
-    "on every turn showing tokens used, tokens available, and generation "
-    "reserve. This is your fuel gauge. The three-step retrieval flow "
-    "(search -> read tree -> load sections) exists so you control exactly "
-    "how many tokens you burn. Before every read_knowledge_section call, "
-    "check the section's token cost in the heading tree against your "
-    "remaining budget. When available tokens drop below 10,000, be "
-    "selective -- load only the single most relevant section. When below "
-    "5,000, stop loading new content entirely and work with what you "
-    "have.\n\n"
-    "You have an entity registry that automatically tracks people, places, "
-    "projects, concepts, and things mentioned in conversations. Use "
-    "lookup_entity to check what you know about someone or something "
-    "before asking the user. Use manage_entity to correct names, add "
-    "aliases, or update summaries.\n\n"
-    "You have tools for: checking time, running shell commands, "
-    "reading/writing files, managing knowledge, entity lookup, and "
-    "updating project context. Use them when they help. No preamble. "
-    "No summaries of what you just did unless asked."
+# -- Core prompt (always present) --
+_CORE_PROMPT = (
+    "You are Agent Zero, local AI on Apple Silicon. Personality: seasoned "
+    "senior data engineer. Dry, witty, direct. Opinions welcome. Warm but "
+    "never bubbly. Deadpan humor. No emojis, no unicode decorations, no "
+    "filler ('Great question!', 'Sure thing!'). Just answer.\n\n"
+    "KB is YOUR workspace -- your files, your notes, not the user's.\n\n"
+    "Memory: conversation memory (automatic), knowledge base (markdown "
+    "files you manage). Entity registry tracks people/places/projects -- "
+    "lookup_entity before asking user.\n\n"
+    "Tools: time, shell, file read/write, KB, entities, project context. "
+    "Use when helpful. No preamble. No post-summaries.\n\n"
+    "When user says 'snapshot', 'save that', or 'save this' -- call "
+    "snapshot_to_knowledge. Content captured automatically, no need to "
+    "reproduce it."
+)
+
+# -- KB block (conditional on KB relevance) --
+_KB_PROMPT = (
+    "\n\n--- KB ACTIVE ---\n"
+    "search_knowledge → file summaries. read_knowledge → heading tree "
+    "(H1-H5, token costs, no content). read_knowledge_section → load "
+    "section. Check cost vs budget before each load.\n\n"
+    "Shop trees, load only what needed. Search before creating new files. "
+    "Edit: read tree → load sections → save full updated content. "
+    "draft_knowledge for big writes (26B refines). save_knowledge for "
+    "quick edits. Save valuable synthesis as KB file.\n\n"
+    "[canon] = read-only, authoritative. "
+    "update_project_context = CLAUDE.md assembly (set project= on save). "
+    "private/secret tags excluded.\n\n"
+    "RULES:\n"
+    "1. PLAN before first KB call.\n"
+    "2. Max 3 section loads/response. Tool refuses after.\n"
+    "3. Check cost vs budget before each load.\n"
+    "4. 'Not found' → pick from tree or respond with what you have.\n"
+    "5. Can answer → respond. No loading 'just in case.'\n"
+    "6. Budget directives (>> ... <<) override all."
 )
 
 TOOLS = [
     get_current_time, run_shell_command, read_file, write_file,
     draft_knowledge, list_knowledge, read_knowledge,
     read_knowledge_section, search_knowledge, save_knowledge,
+    snapshot_to_knowledge,
     update_project_context,
     lookup_entity, manage_entity,
 ]
 
 
+_KB_MAX_LOADS_PER_RESPONSE = 3
+
+
+def _count_kb_loads(messages: list) -> tuple[int, int]:
+    """Count KB section loads and total KB retrieval tokens since last human message.
+
+    Returns (section_loads, kb_tokens).
+    """
+    kb_tool_names = {"read_knowledge_section", "read_knowledge", "search_knowledge"}
+    kb_tokens = 0
+    kb_loads = 0
+    for msg in reversed(messages):
+        if hasattr(msg, "type") and msg.type == "human":
+            break
+        if (hasattr(msg, "type") and msg.type == "tool"
+                and hasattr(msg, "name") and msg.name in kb_tool_names
+                and isinstance(getattr(msg, "content", None), str)):
+            kb_tokens += _estimate_gemma_tokens(msg.content)
+            if msg.name == "read_knowledge_section":
+                kb_loads += 1
+    return kb_loads, kb_tokens
+
+
 def _build_prompt(state: dict) -> list:
-    """Build system prompt with relevant memories injected."""
+    """Build system prompt with conditional KB block, memories, and budget.
+
+    Core prompt (~350 tokens) is always present. KB workflow + retrieval
+    rules (~300 tokens) are injected only when KB content is relevant to
+    the query. Conversational messages get ~65% smaller system prompts.
+    """
     messages = state.get("messages", [])
 
     # Find the latest user message for memory retrieval
@@ -117,55 +114,134 @@ def _build_prompt(state: dict) -> list:
             query = msg.content
             break
 
-    # Base system prompt, optionally enriched with memories and knowledge
-    system_content = SYSTEM_PROMPT
+    # Always start with the slim core prompt
+    system_content = _CORE_PROMPT
 
+    # -- Memory injection (always, when available) --
+    if query and memory_count() > 0:
+        memories = get_relevant_context_compact(query, top_k=3)
+        if memories:
+            mem_block = "\n".join(f"- {m}" for m in memories)
+            system_content += "\n\n[Memory]\n" + mem_block
+
+    # -- KB relevance detection --
+    kb_hits = []
     if query:
-        # Inject compact memory summaries
-        if memory_count() > 0:
-            memories = get_relevant_context_compact(query, top_k=3)
-            if memories:
-                mem_block = "\n".join(f"- {m}" for m in memories)
-                system_content += "\n\n[Memory]\n" + mem_block
-
-        # Inject relevant KB files grouped with structural context
         try:
             kb_hits = _search_kb(query, top_k=5)
-            if kb_hits:
-                lines = ["\n\n[Knowledge base]"]
-                for file_hit in kb_hits[:3]:
-                    fn = file_hit["filename"]
-                    src = " [canon]" if file_hit["source"] == "canon" else ""
-                    ftok = file_hit.get("file_tokens", 0)
-                    outline = file_hit.get("file_outline", "")
-                    lines.append(
-                        f"- {fn}{src} ({ftok:,} tokens, "
-                        f"sections: {outline})"
-                    )
-                    for h in file_hit["hits"][:2]:
-                        lines.append(
-                            f"    matched: {h['heading']} -- {h['summary']}"
-                        )
-                system_content += "\n".join(lines)
         except Exception:
-            pass  # KB index not available -- skip injection
+            pass  # KB index not available
 
-    # Compute context budget status so the agent can manage capacity.
-    # estimate_gemma_tokens applies a 1.5x multiplier to approximate Gemma4
-    # tokenization from cl100k_base counts. Only used here for budget display.
-    all_messages = [SystemMessage(content=system_content)] + list(messages)
-    used_tokens = sum(_estimate_gemma_tokens(m.content) for m in all_messages if hasattr(m, "content") and isinstance(m.content, str))
-    remaining = NUM_CTX - used_tokens
-    generation_reserve = NUM_PREDICT
-    available = max(0, remaining - generation_reserve)
-    pct_used = int((used_tokens / NUM_CTX) * 100)
+    try:
+        kb_loads, kb_tokens = _count_kb_loads(messages)
+    except Exception:
+        kb_loads, kb_tokens = 0, 0
 
-    budget_line = (
-        f"\n\n[Context budget: ~{used_tokens:,} / {NUM_CTX:,} tokens used "
-        f"({pct_used}%) | ~{available:,} available for tool results "
-        f"and generation | reserve {generation_reserve:,} for response]"
-    )
-    all_messages[0] = SystemMessage(content=system_content + budget_line)
+    kb_relevant = bool(kb_hits) or kb_loads > 0
+
+    # Capture last AI response for snapshot_to_knowledge tool.
+    # Walk backward past the current human message, grab first AI with content.
+    last_ai = ""
+    past_human = False
+    for msg in reversed(messages):
+        if hasattr(msg, "type") and msg.type == "human":
+            past_human = True
+            continue
+        if past_human and hasattr(msg, "type") and msg.type == "ai":
+            content = getattr(msg, "content", "")
+            if isinstance(content, str) and content.strip():
+                last_ai = content
+                break
+
+    # Push state to tools module (always, for safety)
+    try:
+        import agent.tools as _tools_module
+        _tools_module._current_kb_loads = kb_loads
+        _tools_module._last_agent_response = last_ai
+    except Exception:
+        pass
+
+    # -- Conditional KB block --
+    if kb_relevant:
+        system_content += _KB_PROMPT
+
+        # Inject relevant KB file summaries
+        if kb_hits:
+            lines = ["\n\n[Knowledge base]"]
+            for file_hit in kb_hits[:3]:
+                fn = file_hit["filename"]
+                src = " [canon]" if file_hit["source"] == "canon" else ""
+                ftok = file_hit.get("file_tokens", 0)
+                outline = file_hit.get("file_outline", "")
+                lines.append(
+                    f"- {fn}{src} ({ftok:,} tokens, "
+                    f"sections: {outline})"
+                )
+                for h in file_hit["hits"][:2]:
+                    lines.append(
+                        f"    matched: {h['heading']} -- {h['summary']}"
+                    )
+            system_content += "\n".join(lines)
+
+        # -- Context budget and retrieval directives --
+        all_messages = [SystemMessage(content=system_content)] + list(messages)
+        used_tokens = sum(
+            _estimate_gemma_tokens(m.content)
+            for m in all_messages
+            if hasattr(m, "content") and isinstance(m.content, str)
+        )
+        remaining = NUM_CTX - used_tokens
+        generation_reserve = NUM_PREDICT
+        available = max(0, remaining - generation_reserve)
+        pct_used = int((used_tokens / NUM_CTX) * 100)
+
+        try:
+            _tools_module._current_available_tokens = available
+        except Exception:
+            pass
+
+        # Escalating directives -- visual markers (>> <<) act as attention
+        # anchors for small models.
+        directive = ""
+        if kb_loads >= _KB_MAX_LOADS_PER_RESPONSE:
+            directive = (
+                "\n\n>> RETRIEVAL LIMIT REACHED: You have loaded "
+                f"{kb_loads} sections this response. Do NOT call "
+                "read_knowledge_section again. Respond now with the "
+                "content you have. <<"
+            )
+        elif available < 5_000:
+            directive = (
+                "\n\n>> CONTEXT FULL: Do NOT call any knowledge tools. "
+                "Respond immediately with what you have. <<"
+            )
+        elif available < 10_000:
+            directive = (
+                "\n\n>> LOW CONTEXT: You may load at most ONE more section. "
+                "Pick the single most relevant one, then respond. <<"
+            )
+        elif available < 20_000:
+            directive = (
+                "\n\n>> Context getting tight. Be selective with further loads. <<"
+            )
+
+        budget_line = (
+            f"\n\n[Context budget: ~{used_tokens:,} / {NUM_CTX:,} tokens used "
+            f"({pct_used}%) | ~{available:,} available | "
+            f"reserve {generation_reserve:,} for response | "
+            f"KB: {kb_loads}/{_KB_MAX_LOADS_PER_RESPONSE} sections loaded "
+            f"(~{kb_tokens:,} tokens)]"
+        )
+        all_messages[0] = SystemMessage(
+            content=system_content + directive + budget_line
+        )
+    else:
+        # No KB context -- reset tool budget to safe defaults
+        try:
+            _tools_module._current_available_tokens = 999_999
+        except Exception:
+            pass
+        all_messages = [SystemMessage(content=system_content)] + list(messages)
 
     return all_messages
 
