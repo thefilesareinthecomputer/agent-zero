@@ -5,7 +5,7 @@ anyio==4.13.0
 attrs==26.1.0
 bcrypt==5.0.0
 build==1.4.2
-certifi==2026.2.25
+certifi==2026.10.18
 charset-normalizer==3.4.7
 chromadb==1.5.5
 click==8.3.1
